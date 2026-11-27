@@ -3,114 +3,195 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Exam Proctor — Proctored Exam Runner</title>
+  <title>261NS1A14PD — AMET University B.Sc. 25 Exam Gateway</title>
   <link rel="stylesheet" href="./styles/proctor.css" />
 </head>
 <body class="proctor-body">
   <div id="proctor-app" class="proctor-app">
+    <div class="institutional-tricolor-bar" aria-hidden="true"></div>
+    <header class="institutional-masthead">
+      <div class="masthead-left">
+        <img
+          src="./assets/amet-banner.jpg"
+          alt="AMET University — NAAC Grade A"
+          class="amet-crest-banner"
+        />
+      </div>
+      <div class="masthead-right">
+        <div class="masthead-meta-top">
+          <span class="paper-code-pill">261NS1A14PD</span>
+          <span class="masthead-gateway-title">AMET University — B.Sc. 25 Exam Gateway</span>
+        </div>
+        <div class="masthead-clock-row">
+          <span class="clock-label">SYSTEM TIME</span>
+          <span id="header-live-clock" class="header-live-clock">--:--:--</span>
+        </div>
+      </div>
+    </header>
+
     <main id="missing-exam-view" class="student-shell" hidden>
-      <section class="proctor-card">
-        <div class="badge-pill">Zero-Install Exam Proctor</div>
-        <h1>No Exam Link Loaded</h1>
+      <section class="proctor-card institutional-notice-card">
+        <div class="badge-pill">261NS1A14PD • EXAMINATION GATEWAY</div>
+        <h1>No Examination Package Loaded</h1>
         <p class="subtitle">
-          Open the exact encrypted exam URL provided by your teacher to begin your proctored session.
+          Open the exact encrypted examination URL issued by your AMET University invigilator to initiate hardware verification and enter the testing portal.
         </p>
-        <div class="form-actions" style="margin-top: 1.25rem;">
-          <a href="./setup.html" class="btn btn-primary">Teacher? Create an Encrypted Exam Link &rarr;</a>
+        <div class="form-actions" style="margin-top: 1.5rem;">
+          <a href="./setup.html" class="btn btn-primary">Examiner? Open Paper Encryption Console &rarr;</a>
         </div>
       </section>
     </main>
 
     <main id="blocked-view" class="student-shell" hidden>
-      <section class="proctor-card">
-        <div class="badge-pill">Environment Check Failed</div>
-        <h1>Browser or Device Blocked</h1>
+      <section class="proctor-card institutional-notice-card">
+        <div class="badge-pill badge-danger">PRE-EXAM ENVIRONMENT CHECK FAILED</div>
+        <h1>Browser or Device Not Compliant</h1>
         <p class="subtitle">
-          This exam cannot start in your current browser environment. Follow the steps below and reopen the exam link:
+          This computer-based examination cannot launch in your current browser configuration. Resolve the items listed below and reopen your official examination link:
         </p>
         <ul id="blocked-reasons" class="blocked-list"></ul>
-        <div class="form-actions" style="margin-top: 1.25rem;">
-          <a href="./setup.html" class="btn btn-secondary">Teacher Setup &rarr;</a>
+        <div class="form-actions" style="margin-top: 1.5rem;">
+          <a href="./setup.html" class="btn btn-secondary">Examiner Console &rarr;</a>
         </div>
       </section>
     </main>
 
-    <main id="start-gate" class="student-shell" hidden>
-      <section class="proctor-card">
-        <div class="badge-pill">Proctored Exam Gate</div>
-        <h1>Verify Identity &amp; Start Exam</h1>
-        <p id="policy-summary" class="subtitle">
-          Active front camera, microphone, and focus monitoring are required throughout the exam.
-        </p>
+    <main id="start-gate" class="student-shell student-shell-wide" hidden>
+      <section class="proctor-card checkin-card">
+        <div class="checkin-card-grid">
+          <div class="exam-brief-col">
+            <div class="badge-pill">OFFICIAL COMPUTER-BASED EXAMINATION</div>
+            <h1 class="paper-hero-code">261NS1A14PD</h1>
+            <p class="paper-hero-subtitle">AMET University — B.Sc. 25 Exam Gateway</p>
 
-        <div id="start-error" class="alert-banner alert-error" role="alert" hidden></div>
-
-        <form id="start-form" class="setup-form" novalidate>
-          <div class="form-grid">
-            <div class="field-group">
-              <label for="student-name">Student Full Name</label>
-              <input
-                id="student-name"
-                name="studentName"
-                type="text"
-                required
-                placeholder="e.g. Riya Patel"
-                autocomplete="name"
-              />
+            <div id="policy-summary" class="policy-spec-box">
+              Policy: Active front camera, microphone, and fullscreen focus monitoring are required throughout the examination.
             </div>
 
-            <div class="field-group">
-              <label for="roll-id">Roll / Student ID</label>
-              <input
-                id="roll-id"
-                name="rollId"
-                type="text"
-                required
-                placeholder="e.g. CS-2026-019"
-                autocomplete="off"
-              />
-            </div>
-
-            <div class="field-group field-span-2">
-              <label for="exam-pin">Exam Access Key (Provided by Teacher)</label>
-              <input
-                id="exam-pin"
-                name="examPin"
-                type="text"
-                required
-                placeholder="EXM-9X4K-2026"
-                autocomplete="off"
-                spellcheck="false"
-              />
-              <span class="field-hint">Enter the exact alphanumeric Exam Access Key announced by your invigilator.</span>
+            <div class="protocol-section">
+              <h2 class="protocol-heading">Candidate Examination Protocol</h2>
+              <ol class="protocol-list">
+                <li>
+                  <strong>Biometric Camera &amp; Audio Lock</strong>
+                  <span>Continuous front-camera liveness and microphone monitoring remain active from sign-in through submission.</span>
+                </li>
+                <li>
+                  <strong>Fullscreen &amp; Display Integrity</strong>
+                  <span>Fullscreen lock is enforced. Tab switching, window blur, split-screen, or extended monitors trigger recorded strikes.</span>
+                </li>
+                <li>
+                  <strong>Zero External / AI Aids</strong>
+                  <span>Print/screenshot shortcuts, clipboard copying, developer tools, virtual cameras, and injected extensions are blocked.</span>
+                </li>
+                <li>
+                  <strong>Automated Malpractice Dispatch to Examiner</strong>
+                  <span>Violations and timestamped camera snapshots are logged and dispatched immediately to the AMET Chief Invigilator.</span>
+                </li>
+              </ol>
             </div>
           </div>
 
-          <details class="setup-guide">
-            <summary>Camera or Microphone Blocked? Permission Troubleshooting</summary>
-            <ul class="guide-steps">
-              <li><strong>Chrome (Desktop &amp; Android):</strong> Tap the lock / site-settings icon in the address bar &rarr; <strong>Permissions</strong> &rarr; allow <strong>Camera</strong> and <strong>Microphone</strong>, then retry.</li>
-              <li><strong>iPhone / iPad Safari:</strong> Tap <strong>AA</strong> (or page settings icon) in the address bar &rarr; <strong>Website Settings</strong> &rarr; set <strong>Camera</strong> and <strong>Microphone</strong> to <strong>Allow</strong>.</li>
-              <li>Virtual cameras (OBS, ManyCam, Snap Camera) and in-app browsers (WhatsApp, Instagram) are automatically blocked.</li>
-            </ul>
-          </details>
+          <div class="exam-checkin-col">
+            <div class="checkin-col-header">
+              <h2>Candidate Sign-In &amp; Hardware Verification</h2>
+              <p class="subtitle">Enter your official university credentials and paper access key below.</p>
+            </div>
 
-          <div class="form-actions">
-            <button type="submit" id="start-exam-btn" class="btn btn-primary">
-              Allow Camera, Mic &amp; Start Exam
-            </button>
+            <div id="start-error" class="alert-banner alert-error" role="alert" hidden></div>
+
+            <form id="start-form" class="setup-form" novalidate>
+              <div class="form-grid">
+                <div class="field-group field-span-2">
+                  <label for="student-name">Candidate Full Name</label>
+                  <input
+                    id="student-name"
+                    name="studentName"
+                    type="text"
+                    required
+                    placeholder="e.g. Riya Patel"
+                    autocomplete="name"
+                  />
+                </div>
+
+                <div class="field-group field-span-2">
+                  <label for="roll-id">Register / Roll Number</label>
+                  <input
+                    id="roll-id"
+                    name="rollId"
+                    type="text"
+                    required
+                    placeholder="e.g. 261NS1A1401"
+                    autocomplete="off"
+                  />
+                </div>
+
+                <div class="field-group field-span-2">
+                  <label for="exam-pin">Examination Access Key</label>
+                  <input
+                    id="exam-pin"
+                    name="examPin"
+                    type="text"
+                    required
+                    placeholder="EXM-9X4K-2026"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <span class="field-hint">Enter the exact alphanumeric Examination Access Key announced by your invigilator.</span>
+                </div>
+              </div>
+
+              <details class="setup-guide">
+                <summary>Camera or Microphone Blocked? Permission Help</summary>
+                <ul class="guide-steps">
+                  <li><strong>Chrome (Desktop &amp; Android):</strong> Click the site-settings / lock icon in the address bar &rarr; <strong>Permissions</strong> &rarr; Allow <strong>Camera</strong> and <strong>Microphone</strong>, then retry.</li>
+                  <li><strong>iPhone / iPad Safari:</strong> Tap <strong>AA</strong> in the address bar &rarr; <strong>Website Settings</strong> &rarr; set <strong>Camera</strong> and <strong>Microphone</strong> to <strong>Allow</strong>.</li>
+                  <li>Virtual cameras (OBS, ManyCam, Snap Camera) and in-app browsers (WhatsApp, Instagram) are automatically blocked.</li>
+                </ul>
+              </details>
+
+              <p class="honour-declaration">
+                Honour Declaration: I affirm that I will complete examination <strong>261NS1A14PD</strong> independently without external assistance and consent to continuous automated proctoring.
+              </p>
+
+              <div class="form-actions">
+                <button type="submit" id="start-exam-btn" class="btn btn-primary btn-block">
+                  Verify Hardware &amp; Begin Examination
+                </button>
+              </div>
+            </form>
           </div>
-        </form>
+        </div>
       </section>
     </main>
 
     <section id="exam-stage" class="exam-stage" hidden>
+      <header class="exam-topbar" role="banner">
+        <div class="topbar-left">
+          <span class="topbar-code-pill">261NS1A14PD</span>
+          <span class="topbar-gateway-name">AMET University B.Sc. 25 Exam Gateway</span>
+        </div>
+        <div class="topbar-center">
+          <span id="active-candidate-badge" class="topbar-candidate-badge">Candidate</span>
+          <span id="exam-elapsed-timer" class="topbar-elapsed-timer" aria-label="Elapsed exam time">00:00:00</span>
+        </div>
+        <div class="topbar-right">
+          <span id="strike-pill" class="strike-pill">Strikes: 0 / 3</span>
+          <button type="button" id="reenter-fullscreen-btn" class="btn btn-topbar-fs btn-sm" hidden>
+            Re-enter Fullscreen
+          </button>
+          <span class="live-proctored-pill">
+            <span class="live-pulse-dot" aria-hidden="true"></span>
+            LIVE PROCTORED
+          </span>
+        </div>
+      </header>
+
       <iframe
         id="exam-iframe"
         class="exam-iframe"
         referrerpolicy="no-referrer"
         allow="fullscreen"
-        title="Proctored Google Form Exam"
+        title="261NS1A14PD Proctored Examination Paper"
       ></iframe>
 
       <div id="stealth-watermark-layer" class="stealth-watermark-layer" aria-hidden="true"></div>
@@ -127,10 +208,6 @@
           <div class="mic-meter-track" aria-label="Microphone level">
             <div id="mic-meter-fill" class="mic-meter-fill"></div>
           </div>
-          <div id="strike-pill" class="strike-pill">Strikes: 0 / 3</div>
-          <button type="button" id="reenter-fullscreen-btn" class="btn btn-secondary btn-sm" hidden>
-            Re-enter Fullscreen
-          </button>
         </div>
       </aside>
 
@@ -138,11 +215,11 @@
 
       <div id="lockout-overlay" class="lockout-overlay" role="dialog" aria-modal="true" aria-labelledby="lockout-title" hidden>
         <div class="lockout-card">
-          <div class="badge-pill badge-danger">Exam Session Locked</div>
-          <h2 id="lockout-title">Malpractice Lockout</h2>
+          <div class="badge-pill badge-danger">261NS1A14PD • SESSION LOCKED</div>
+          <h2 id="lockout-title">Examination Malpractice Lockout</h2>
           <p id="lockout-message" class="lockout-alert-text"></p>
           <p class="subtitle">
-            Your answers remain preserved. Ask your invigilator to enter the Teacher Unlock Key below to resume.
+            Your submitted responses remain preserved. Request your AMET University invigilator to enter the Teacher Unlock Key below to resume.
           </p>
 
           <div id="unlock-error" class="alert-banner alert-error" role="alert" hidden></div>
@@ -161,8 +238,8 @@
               />
             </div>
             <div class="form-actions">
-              <button type="submit" id="unlock-submit-btn" class="btn btn-primary">
-                Unlock Exam
+              <button type="submit" id="unlock-submit-btn" class="btn btn-primary btn-block">
+                Unlock Examination Session
               </button>
             </div>
           </form>

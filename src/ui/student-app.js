@@ -175,7 +175,7 @@ export function createExamSessionController(deps) {
 
   const token = deps.token.trim();
   const meta = parseEnvelopeMetadata(token);
-  const sessionStore = resolveStorage(deps.storage, 'sessionStorage');
+  const sessionStore = resolveStorage(deps.storage, 'localStorage');
   const telemetryStore = resolveStorage(deps.storage, 'localStorage');
 
   let deviceType = 'desktop';
@@ -242,7 +242,8 @@ export function createExamSessionController(deps) {
     const snapshotField =
       typeof snapshotBase64 === 'string' && snapshotBase64.length > 0 ? { snapshotBase64 } : {};
 
-    await safeEnqueue(
+    // Enqueue asynchronously after synchronous storage persistence so UI never stalls on mobile data.
+    void safeEnqueue(
       'STRIKE',
       {
         strikes: res.strikes,
@@ -253,10 +254,10 @@ export function createExamSessionController(deps) {
         ...snapshotField,
       },
       eventIso
-    );
+    ).catch(() => {});
 
     if (res.locked) {
-      await safeEnqueue(
+      void safeEnqueue(
         'LOCKOUT',
         {
           strikes: res.strikes,
@@ -267,7 +268,7 @@ export function createExamSessionController(deps) {
           ...snapshotField,
         },
         eventIso
-      );
+      ).catch(() => {});
     }
 
     return {
@@ -310,7 +311,7 @@ export function createExamSessionController(deps) {
       throw new Error(mediaCheck.reason);
     }
 
-    const sessionLookupKey = `proctor_session_${cleanRoll}_${token.slice(0, 12)}`;
+    const sessionLookupKey = `proctor_session_${cleanRoll}_${meta.unlockHash.slice(0, 16)}`;
     const existingSessionId = safeStorageGet(sessionStore, sessionLookupKey);
     const isResume = Boolean(existingSessionId);
     const sessionId = existingSessionId || generateSessionId();
@@ -353,7 +354,8 @@ export function createExamSessionController(deps) {
     const snapshotField =
       typeof snapshotBase64 === 'string' && snapshotBase64.length > 0 ? { snapshotBase64 } : {};
 
-    await safeEnqueue(
+    // Enqueue asynchronously after synchronous storage persistence so exam start never stalls.
+    void safeEnqueue(
       startEventType,
       {
         strikes: initialState.strikes,
@@ -363,7 +365,7 @@ export function createExamSessionController(deps) {
         ...snapshotField,
       },
       nowIso
-    );
+    ).catch(() => {});
 
     const watermarkText = formatWatermarkText({
       studentName: cleanName,
@@ -401,7 +403,11 @@ export function createExamSessionController(deps) {
     });
 
     if (unlockGraceUntil !== null) {
-      if (integrity.ok || currentMs >= unlockGraceUntil) {
+      if (
+        integrity.ok ||
+        currentMs >= unlockGraceUntil ||
+        integrity.violation !== 'FULLSCREEN_EXITED'
+      ) {
         unlockGraceUntil = null;
       } else {
         return {
@@ -430,24 +436,53 @@ export function createExamSessionController(deps) {
   }
 
   async function evaluateMediaSample(
-    { rgbaPixels, audioSamples },
+    { rgbaPixels, audioSamples, tracks } = {},
     nowMs = Date.now(),
     snapshotBase64 = null
   ) {
     ensureStarted();
-    const frame = analyzeVideoFrame(rgbaPixels);
-    const audio = analyzeAudioSamples(audioSamples);
-    cameraOk = !frame.isBlackOrCovered;
+    const audio =
+      audioSamples !== undefined && audioSamples !== null
+        ? analyzeAudioSamples(audioSamples)
+        : { rms: 0, isSpeechSpike: false };
+
+    if (tracks !== undefined && tracks !== null) {
+      const trackRes = validateMediaTracks(tracks);
+      if (!trackRes.valid) {
+        cameraOk =
+          trackRes.reason !== 'CAMERA_INACTIVE' && trackRes.reason !== 'VIRTUAL_CAMERA_BLOCKED';
+        const micOk = trackRes.reason !== 'MIC_INACTIVE';
+        const trackStrike = await recordViolationAndNotify(trackRes.reason, nowMs, snapshotBase64);
+        return {
+          cameraOk,
+          micOk,
+          violation: trackRes.reason,
+          rms: audio.rms,
+          isSpeechSpike: audio.isSpeechSpike,
+          counted: trackStrike.counted,
+          alertMessage: trackStrike.alertMessage,
+          ...strikeEngine.getState(),
+        };
+      }
+    }
 
     let strikeResult = null;
 
-    if (frame.isBlackOrCovered) {
-      consecutiveBlackFrames += 1;
-      if (consecutiveBlackFrames >= CONSECUTIVE_MEDIA_VIOLATION_THRESHOLD) {
+    if (rgbaPixels !== undefined && rgbaPixels !== null) {
+      const frame = analyzeVideoFrame(rgbaPixels);
+      cameraOk = !frame.isBlackOrCovered;
+
+      if (frame.isBlackOrCovered) {
+        consecutiveBlackFrames += 1;
+        if (consecutiveBlackFrames >= CONSECUTIVE_MEDIA_VIOLATION_THRESHOLD) {
+          consecutiveBlackFrames = 0;
+          strikeResult = await recordViolationAndNotify('CAMERA_COVERED', nowMs, snapshotBase64);
+        }
+      } else {
         consecutiveBlackFrames = 0;
-        strikeResult = await recordViolationAndNotify('CAMERA_COVERED', nowMs, snapshotBase64);
       }
     } else {
+      cameraOk = true;
       consecutiveBlackFrames = 0;
     }
 
@@ -467,6 +502,7 @@ export function createExamSessionController(deps) {
 
     return {
       cameraOk,
+      micOk: true,
       rms: audio.rms,
       isSpeechSpike: audio.isSpeechSpike,
       counted: strikeResult ? strikeResult.counted : false,
@@ -646,6 +682,9 @@ export function initStudentPage(
   const unlockForm = doc.getElementById('unlock-form');
   const unlockSubmitBtn = doc.getElementById('unlock-submit-btn');
   const unlockPinInput = doc.getElementById('unlock-pin-input');
+  const headerLiveClock = doc.getElementById('header-live-clock');
+  const activeCandidateBadge = doc.getElementById('active-candidate-badge');
+  const examElapsedTimer = doc.getElementById('exam-elapsed-timer');
 
   function showOnlyView(viewToShow) {
     for (const view of [missingView, blockedView, startGate, examStage]) {
@@ -726,7 +765,91 @@ export function initStudentPage(
   let isHealingStealthLayers = false;
   let toastTimerId = null;
   let broadcastChannel = null;
+  let examStartedAtMs = null;
   const tabInstanceId = generateSessionId();
+
+  const scheduleInterval = (fn, ms) =>
+    typeof win?.setInterval === 'function' ? win.setInterval(fn, ms) : setInterval(fn, ms);
+
+  function formatLocalClock() {
+    try {
+      const now = new Date();
+      const hh = String(now.getHours()).padStart(2, '0');
+      const mm = String(now.getMinutes()).padStart(2, '0');
+      const ss = String(now.getSeconds()).padStart(2, '0');
+      return `${hh}:${mm}:${ss}`;
+    } catch {
+      return '';
+    }
+  }
+
+  function formatElapsedHms(elapsedMs) {
+    const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+    const hrs = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
+    const mins = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0');
+    const secs = String(totalSeconds % 60).padStart(2, '0');
+    return `${hrs}:${mins}:${secs}`;
+  }
+
+  if (headerLiveClock) {
+    const updateHeaderClock = () => {
+      try {
+        headerLiveClock.textContent = formatLocalClock();
+      } catch {
+        // Ignore DOM update errors.
+      }
+    };
+    updateHeaderClock();
+    scheduleInterval(updateHeaderClock, 1000);
+  }
+
+  function extractStreamTracks(stream) {
+    const videoTrack = stream?.getVideoTracks?.()?.[0];
+    const audioTrack = stream?.getAudioTracks?.()?.[0];
+    return {
+      videoLabel: videoTrack?.label || '',
+      videoReadyState: videoTrack?.readyState || 'ended',
+      videoMuted: Boolean(videoTrack?.muted),
+      audioLabel: audioTrack?.label || '',
+      audioReadyState: audioTrack?.readyState || 'ended',
+      audioMuted: Boolean(audioTrack?.muted),
+    };
+  }
+
+  function waitForVideoReady(videoEl, timeoutMs = 600) {
+    if (!videoEl || typeof videoEl.readyState !== 'number' || videoEl.readyState >= 2) {
+      return Promise.resolve();
+    }
+    if (typeof videoEl.addEventListener !== 'function') {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      let timerId = null;
+      const done = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timerId !== null) {
+          clearTimeout(timerId);
+        }
+        try {
+          videoEl.removeEventListener?.('loadeddata', done);
+        } catch {
+          // Ignore cleanup errors in DOM mocks.
+        }
+        resolve();
+      };
+      try {
+        videoEl.addEventListener('loadeddata', done, { once: true });
+      } catch {
+        done();
+        return;
+      }
+      timerId = setTimeout(done, timeoutMs);
+    });
+  }
 
   function getOffscreenCanvas(width, height) {
     try {
@@ -985,6 +1108,7 @@ export function initStudentPage(
       stealthWatermarkLayer.innerHTML = '';
       for (const label of tiles) {
         const tile = doc.createElement('span');
+        tile.hidden = false;
         tile.className = 'stealth-tile';
         tile.textContent = label;
         stealthWatermarkLayer.appendChild(tile);
@@ -1005,6 +1129,7 @@ export function initStudentPage(
       aiCanaryLayer.innerHTML = '';
       for (let i = 0; i < 10; i += 1) {
         const line = doc.createElement('span');
+        line.hidden = false;
         line.className = 'ai-canary-tile';
         line.textContent = canaryText;
         aiCanaryLayer.appendChild(line);
@@ -1014,6 +1139,32 @@ export function initStudentPage(
         isHealingStealthLayers = false;
       });
     }
+  }
+
+  function isChildTampered(child) {
+    if (!child) {
+      return true;
+    }
+    if (child.hidden === true) {
+      return true;
+    }
+    if (typeof child.hasAttribute === 'function') {
+      if (child.hasAttribute('style') || child.hasAttribute('hidden')) {
+        return true;
+      }
+    }
+    const styleAttr = child.getAttribute?.('style');
+    if (typeof styleAttr === 'string' && styleAttr.length > 0) {
+      return true;
+    }
+    const hiddenAttr = child.getAttribute?.('hidden');
+    if (hiddenAttr !== null && hiddenAttr !== undefined) {
+      return true;
+    }
+    if (typeof child.style?.cssText === 'string' && child.style.cssText.length > 0) {
+      return true;
+    }
+    return false;
   }
 
   function ensureStealthLayerIntegrity() {
@@ -1032,7 +1183,9 @@ export function initStudentPage(
           setRef: (el) => {
             stealthWatermarkLayer = el;
           },
-          needsContent: (el) => el.children.length === 0 && activeWatermarkTiles.length > 0,
+          needsContent: (el) =>
+            activeWatermarkTiles.length > 0 &&
+            (el.children.length !== 24 || Array.from(el.children).some(isChildTampered)),
           restoreContent: () => populateStealthWatermark(activeWatermarkTiles),
         },
         {
@@ -1042,7 +1195,9 @@ export function initStudentPage(
           setRef: (el) => {
             aiCanaryLayer = el;
           },
-          needsContent: (el) => el.children.length === 0 && activeAiCanaryText.length > 0,
+          needsContent: (el) =>
+            activeAiCanaryText.length > 0 &&
+            (el.children.length !== 10 || Array.from(el.children).some(isChildTampered)),
           restoreContent: () => populateAiCanary(activeAiCanaryText),
         },
         {
@@ -1111,7 +1266,22 @@ export function initStudentPage(
       }
       broadcastChannel = new BC('exam_proctor_active');
       broadcastChannel.addEventListener?.('message', (event) => {
-        if (event?.data?.tabId && event.data.tabId !== tabInstanceId) {
+        const data = event?.data;
+        if (!data?.tabId || data.tabId === tabInstanceId) {
+          return;
+        }
+        if (data.type === 'PROCTOR_ACTIVE') {
+          void handleExternalViolation('DUPLICATE_TAB_DETECTED');
+          try {
+            broadcastChannel.postMessage({
+              type: 'PROCTOR_ACK',
+              tabId: tabInstanceId,
+              sessionId,
+            });
+          } catch {
+            // Ignore postMessage failures if channel was closed.
+          }
+        } else if (data.type === 'PROCTOR_ACK') {
           void handleExternalViolation('DUPLICATE_TAB_DETECTED');
         }
       });
@@ -1152,24 +1322,36 @@ export function initStudentPage(
       }
     };
 
-    const scheduleInterval = (fn, ms) =>
-      typeof win?.setInterval === 'function' ? win.setInterval(fn, ms) : setInterval(fn, ms);
-
     scheduleInterval(() => void runRuntimeCheck(), RUNTIME_POLL_INTERVAL_MS);
+
+    if (examElapsedTimer) {
+      scheduleInterval(() => {
+        if (!isExamActive || examStartedAtMs === null) {
+          return;
+        }
+        try {
+          examElapsedTimer.textContent = formatElapsedHms(Date.now() - examStartedAtMs);
+        } catch {
+          // Ignore DOM update errors.
+        }
+      }, 1000);
+    }
 
     scheduleInterval(async () => {
       if (!isExamActive) {
         return;
       }
+      const tracks = activeStream ? extractStreamTracks(activeStream) : undefined;
       const rgbaPixels = sampleVideoRgbaPixels();
       const audioSamples = sampleAudioTimeDomain();
-      if (!rgbaPixels && !audioSamples) {
+      if (!tracks && !rgbaPixels && !audioSamples) {
         return;
       }
       const mediaRes = await controller.evaluateMediaSample(
         {
-          rgbaPixels: rgbaPixels || new Uint8ClampedArray([120, 120, 120, 255, 180, 180, 180, 255]),
-          audioSamples: audioSamples || new Float32Array([0]),
+          rgbaPixels,
+          audioSamples,
+          tracks,
         },
         Date.now(),
         captureSnapshotBase64
@@ -1346,16 +1528,7 @@ export function initStudentPage(
         return;
       }
 
-      const videoTrack = stream.getVideoTracks?.()[0];
-      const audioTrack = stream.getAudioTracks?.()[0];
-      const tracks = {
-        videoLabel: videoTrack?.label || '',
-        videoReadyState: videoTrack?.readyState || 'ended',
-        videoMuted: Boolean(videoTrack?.muted),
-        audioLabel: audioTrack?.label || '',
-        audioReadyState: audioTrack?.readyState || 'ended',
-        audioMuted: Boolean(audioTrack?.muted),
-      };
+      const tracks = extractStreamTracks(stream);
 
       // Warm up shared AudioContext inside user gesture so iOS/Android allows audio & beeps.
       ensureAudioContext();
@@ -1371,6 +1544,7 @@ export function initStudentPage(
       }
 
       try {
+        await waitForVideoReady(hudVideo, 600);
         const snapshotBase64 = captureSnapshotBase64();
         const started = await controller.startExam({
           studentName,
@@ -1384,6 +1558,14 @@ export function initStudentPage(
         attachAudioAnalyser(activeStream);
         activeWatermarkTiles = started.watermarkTiles;
         activeAiCanaryText = started.aiCanaryText;
+        examStartedAtMs = Date.now();
+
+        if (activeCandidateBadge) {
+          activeCandidateBadge.textContent = `${studentName.trim()} • ${rollId.trim()}`;
+        }
+        if (examElapsedTimer) {
+          examElapsedTimer.textContent = '00:00:00';
+        }
 
         if (examIframe) {
           examIframe.src = started.formUrl;

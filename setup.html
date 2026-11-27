@@ -3,21 +3,41 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Exam Proctor — Teacher Setup &amp; Forensic Decoder</title>
+  <title>261NS1A14PD — AMET University Examiner Control &amp; Paper Encryption Console</title>
   <link rel="stylesheet" href="./styles/proctor.css" />
 </head>
 <body class="proctor-body">
+  <div class="institutional-tricolor-bar" aria-hidden="true"></div>
+  <header class="institutional-masthead">
+    <div class="masthead-left">
+      <img
+        src="./assets/amet-banner.jpg"
+        alt="AMET University — NAAC Grade A"
+        class="amet-crest-banner"
+      />
+    </div>
+    <div class="masthead-right">
+      <div class="masthead-meta-top">
+        <span class="paper-code-pill">261NS1A14PD</span>
+        <span class="masthead-gateway-title">AMET University — B.Sc. 25 Exam Gateway</span>
+      </div>
+      <div class="masthead-clock-row">
+        <span class="clock-label">261NS1A14PD • Examiner Control &amp; Paper Encryption Console</span>
+      </div>
+    </div>
+  </header>
+
   <main class="setup-shell">
     <header class="setup-header">
-      <div class="badge-pill">Zero-Install Exam Proctor</div>
-      <h1>Teacher Exam Link Generator</h1>
+      <div class="badge-pill">261NS1A14PD • Examiner Administration Portal</div>
+      <h1>Examiner Control &amp; Paper Encryption Console</h1>
       <p class="subtitle">
-        Encrypt your Google Form link inside a tamper-resistant student URL, enable live Google Sheet &amp; Gmail malpractice alerts, or decode leaked exam screenshots.
+        Encrypt the official Google Form paper into a tamper-resistant AMET University candidate URL, enable live Google Sheet &amp; Gmail malpractice alerts, or forensically decode leaked exam screenshots.
       </p>
     </header>
 
     <section class="proctor-card" aria-labelledby="setup-heading">
-      <h2 id="setup-heading" class="card-title">1. Configure Encrypted Exam Link</h2>
+      <h2 id="setup-heading" class="card-title">1. Configure Encrypted Examination Paper Link</h2>
 
       <div id="setup-error" class="alert-banner alert-error" role="alert" hidden></div>
 
@@ -30,7 +50,8 @@
               name="examTitle"
               type="text"
               required
-              placeholder="e.g. CS-201 Midterm Algorithms Exam"
+              value="261NS1A14PD — AMET University B.Sc. 25 Examination"
+              placeholder="e.g. 261NS1A14PD — AMET University B.Sc. 25 Examination"
               autocomplete="off"
             />
           </div>
@@ -64,7 +85,7 @@
                 Generate Key
               </button>
             </div>
-            <span class="field-hint">AES-256-GCM key students enter to unlock the exam.</span>
+            <span class="field-hint">AES-256-GCM key candidates enter to unlock the examination paper.</span>
           </div>
 
           <div class="field-group">
@@ -83,7 +104,7 @@
                 Generate Key
               </button>
             </div>
-            <span class="field-hint">Only the invigilator uses this key to unlock a locked-out screen.</span>
+            <span class="field-hint">Only the invigilator uses this key to unlock a locked-out candidate terminal.</span>
           </div>
 
           <div class="field-group">
@@ -103,7 +124,7 @@
             <label for="lock-mode">Violation Mode</label>
             <select id="lock-mode" name="lockMode">
               <option value="hard-lock" selected>Hard Lock — Lock Screen &amp; Require Teacher Key</option>
-              <option value="warn-only">Warn Only — Warn Student &amp; Log Telemetry</option>
+              <option value="warn-only">Warn Only — Warn Candidate &amp; Log Telemetry</option>
             </select>
           </div>
 
@@ -124,7 +145,7 @@
               placeholder="https://script.google.com/macros/s/.../exec"
               autocomplete="off"
             />
-            <span class="field-hint">Logs live attendance, strikes, lockouts, and sends instant Gmail alerts to you.</span>
+            <span class="field-hint">Logs live attendance, strikes, lockouts, and dispatches instant Gmail alerts with snapshots.</span>
           </div>
         </div>
 
@@ -156,8 +177,8 @@
       </form>
 
       <div id="result-panel" class="result-panel" hidden>
-        <h3>Encrypted Student Exam Link Ready</h3>
-        <p class="field-hint">Share this URL with students before the exam. Keep the Exam Access Key private until start time.</p>
+        <h3>Encrypted Examination Link Ready</h3>
+        <p class="field-hint">Distribute this URL to candidates before the exam. Keep the Exam Access Key private until start time.</p>
         <div class="result-row">
           <input id="student-link-output" type="text" readonly aria-label="Encrypted Student Exam URL" />
           <button type="button" id="copy-link-btn" class="btn btn-secondary">Copy Student Link</button>

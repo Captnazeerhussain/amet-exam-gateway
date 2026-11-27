@@ -1237,3 +1237,737 @@ test('initStudentPage guards #start-form against rapid double-submit and re-enab
   assert.equal(fullscreenCallCount, beforeUnlockFs + 1);
   await unlockPromise;
 });
+
+test('per-exam unlockHash session isolation and default localStorage cross-tab persistence', async () => {
+  const { token: tokenA } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'Exam Alpha',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScAlpha/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-ALPHA-01',
+    unlockPin: 'TCH-ALPHA-01',
+    maxStrikes: 2,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const { token: tokenB } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'Exam Beta',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScBeta/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-BETA-01',
+    unlockPin: 'TCH-BETA-01',
+    maxStrikes: 2,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const originalLocalStorageDesc = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const sharedLocalStorage = createMemoryStorage();
+
+  try {
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: sharedLocalStorage,
+    });
+
+    const controllerA = createExamSessionController({ token: tokenA });
+    const controllerB = createExamSessionController({ token: tokenB });
+
+    const tracks = {
+      videoLabel: 'HD Webcam',
+      videoReadyState: 'live',
+      audioLabel: 'Mic',
+      audioReadyState: 'live',
+    };
+
+    const startA = await controllerA.startExam({
+      studentName: 'Surya Narayanan',
+      rollId: '261NS1A1401',
+      examPin: 'EXM-ALPHA-01',
+      tracks,
+    });
+
+    const startB = await controllerB.startExam({
+      studentName: 'Surya Narayanan',
+      rollId: '261NS1A1401',
+      examPin: 'EXM-BETA-01',
+      tracks,
+    });
+
+    assert.notEqual(startA.sessionId, startB.sessionId);
+
+    // Strike on Exam A must not affect Exam B, and must persist to localStorage for reopened tabs
+    await controllerA.recordExternalViolation('SHORTCUT_BLOCKED', 1000);
+    await controllerA.recordExternalViolation('SHORTCUT_BLOCKED', 5000);
+
+    const reopenedA = createExamSessionController({ token: tokenA });
+    const resumedA = await reopenedA.startExam({
+      studentName: 'Surya Narayanan',
+      rollId: '261NS1A1401',
+      examPin: 'EXM-ALPHA-01',
+      tracks,
+    });
+    assert.equal(resumedA.sessionId, startA.sessionId);
+    assert.equal(resumedA.state.strikes, 2);
+    assert.equal(resumedA.state.locked, true);
+
+    const reopenedB = createExamSessionController({ token: tokenB });
+    const resumedB = await reopenedB.startExam({
+      studentName: 'Surya Narayanan',
+      rollId: '261NS1A1401',
+      examPin: 'EXM-BETA-01',
+      tracks,
+    });
+    assert.equal(resumedB.sessionId, startB.sessionId);
+    assert.equal(resumedB.state.strikes, 0);
+    assert.equal(resumedB.state.locked, false);
+  } finally {
+    if (originalLocalStorageDesc) {
+      Object.defineProperty(globalThis, 'localStorage', originalLocalStorageDesc);
+    } else {
+      delete globalThis.localStorage;
+    }
+  }
+});
+
+test('startExam and evaluateTick resolve in < 50ms even when telemetry fetch hangs for 5000ms', async () => {
+  const { token } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'Non-Blocking Telemetry Exam',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScHang/viewform',
+    webhookUrl: 'https://script.google.com/macros/s/AKfyHang/exec',
+    examPin: 'EXM-HANG-2026',
+    unlockPin: 'TCH-HANG-99',
+    maxStrikes: 1,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const pendingTimers = [];
+  const controller = createExamSessionController({
+    token,
+    storage: createMemoryStorage(),
+    fetchFn: (_url, init) =>
+      new Promise((resolve) => {
+        const id = setTimeout(() => resolve({ ok: true }), 5000);
+        pendingTimers.push({ id, resolve });
+        init?.signal?.addEventListener?.('abort', () => {
+          clearTimeout(id);
+          resolve({ ok: false });
+        });
+      }),
+  });
+
+  controller.checkEnvironment({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+    webdriver: false,
+  });
+
+  const tStart0 = performance.now();
+  await controller.startExam({
+    studentName: 'Vikram Das',
+    rollId: '261NS1A1402',
+    examPin: 'EXM-HANG-2026',
+    tracks: {
+      videoLabel: 'HD Webcam',
+      videoReadyState: 'live',
+      audioLabel: 'Mic',
+      audioReadyState: 'live',
+    },
+  });
+  const startElapsed = performance.now() - tStart0;
+  assert.ok(startElapsed < 50, `Expected startExam < 50ms, took ${startElapsed.toFixed(1)}ms`);
+
+  const tTick0 = performance.now();
+  const lockTick = await controller.evaluateTick(
+    {
+      isFullscreen: true,
+      hasFocus: false,
+      visibilityState: 'visible',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    1000
+  );
+  const tickElapsed = performance.now() - tTick0;
+  assert.equal(lockTick.counted, true);
+  assert.equal(lockTick.locked, true);
+  assert.ok(tickElapsed < 50, `Expected evaluateTick < 50ms, took ${tickElapsed.toFixed(1)}ms`);
+
+  for (const item of pendingTimers) {
+    clearTimeout(item.id);
+    item.resolve({ ok: true });
+  }
+});
+
+test('post-unlock 3000ms grace window suppresses FULLSCREEN_EXITED but immediately counts TAB_HIDDEN', async () => {
+  const { token } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'Scoped Grace Exam',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScScoped/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-SCOPE-2026',
+    unlockPin: 'TCH-SCOPE-99',
+    maxStrikes: 2,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const controller = createExamSessionController({
+    token,
+    storage: createMemoryStorage(),
+  });
+
+  controller.checkEnvironment({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+    webdriver: false,
+  });
+
+  await controller.startExam({
+    studentName: 'Neha Verma',
+    rollId: '261NS1A1403',
+    examPin: 'EXM-SCOPE-2026',
+    tracks: {
+      videoLabel: 'HD Webcam',
+      videoReadyState: 'live',
+      audioLabel: 'Mic',
+      audioReadyState: 'live',
+    },
+  });
+
+  await controller.evaluateTick(
+    {
+      isFullscreen: false,
+      hasFocus: true,
+      visibilityState: 'visible',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    1000
+  );
+  await controller.evaluateTick(
+    {
+      isFullscreen: false,
+      hasFocus: true,
+      visibilityState: 'visible',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    5000
+  );
+
+  const unlocked = await controller.unlockExam('TCH-SCOPE-99', 10000);
+  assert.equal(unlocked.unlocked, true);
+  assert.equal(unlocked.strikes, 1);
+
+  // Within 3000ms grace window: FULLSCREEN_EXITED is suppressed
+  const fsGrace = await controller.evaluateTick(
+    {
+      isFullscreen: false,
+      hasFocus: true,
+      visibilityState: 'visible',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    11000
+  );
+  assert.equal(fsGrace.counted, false);
+  assert.equal(fsGrace.locked, false);
+  assert.equal(fsGrace.gracePeriod, true);
+
+  // Within 3000ms grace window: TAB_HIDDEN must clear grace and count strike + re-lock immediately
+  const tabHidden = await controller.evaluateTick(
+    {
+      isFullscreen: true,
+      hasFocus: false,
+      visibilityState: 'hidden',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    11500
+  );
+  assert.equal(tabHidden.violation, 'TAB_HIDDEN');
+  assert.equal(tabHidden.counted, true);
+  assert.equal(tabHidden.strikes, 2);
+  assert.equal(tabHidden.locked, true);
+});
+
+test('evaluateMediaSample detects mid-exam videoReadyState ended as CAMERA_INACTIVE', async () => {
+  const { token } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'Track Disconnect Exam',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScTrack/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-TRACK-2026',
+    unlockPin: 'TCH-TRACK-99',
+    maxStrikes: 2,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const controller = createExamSessionController({
+    token,
+    storage: createMemoryStorage(),
+  });
+
+  controller.checkEnvironment({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+    webdriver: false,
+  });
+
+  await controller.startExam({
+    studentName: 'Arjun Menon',
+    rollId: '261NS1A1404',
+    examPin: 'EXM-TRACK-2026',
+    tracks: {
+      videoLabel: 'HD Webcam',
+      videoReadyState: 'live',
+      audioLabel: 'Mic',
+      audioReadyState: 'live',
+    },
+  });
+
+  // Live tracks with null rgbaPixels must NOT false-trigger CAMERA_COVERED
+  const noPixelsLive = await controller.evaluateMediaSample(
+    {
+      rgbaPixels: null,
+      audioSamples: new Float32Array([0.001, -0.001]),
+      tracks: {
+        videoLabel: 'HD Webcam',
+        videoReadyState: 'live',
+        videoMuted: false,
+        audioLabel: 'Mic',
+        audioReadyState: 'live',
+        audioMuted: false,
+      },
+    },
+    1000
+  );
+  assert.equal(noPixelsLive.cameraOk, true);
+  assert.equal(noPixelsLive.counted, false);
+
+  // Mid-exam camera unplug (videoReadyState: 'ended') immediately triggers CAMERA_INACTIVE
+  const camEnded = await controller.evaluateMediaSample(
+    {
+      rgbaPixels: null,
+      audioSamples: null,
+      tracks: {
+        videoLabel: 'HD Webcam',
+        videoReadyState: 'ended',
+        videoMuted: false,
+        audioLabel: 'Mic',
+        audioReadyState: 'live',
+        audioMuted: false,
+      },
+    },
+    4000
+  );
+  assert.equal(camEnded.cameraOk, false);
+  assert.equal(camEnded.micOk, true);
+  assert.equal(camEnded.violation, 'CAMERA_INACTIVE');
+  assert.equal(camEnded.counted, true);
+  assert.equal(camEnded.strikes, 1);
+  assert.match(camEnded.alertMessage, /CAMERA_INACTIVE/);
+});
+
+test('initStudentPage enforces two-way BroadcastChannel PROCTOR_ACK and child stealth-tile style tamper detection', async () => {
+  const { examUrl } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'Tamper & Two-Way BC Exam',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScBc/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-BC-2026',
+    unlockPin: 'TCH-BC-99',
+    maxStrikes: 5,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const elements = new Map();
+  const observerCallbacks = [];
+  const postedMessages = [];
+  const channelListeners = [];
+
+  function makeDomEl(id, initial = {}) {
+    const elListeners = new Map();
+    const classes = new Set();
+    const attrs = new Map();
+    const el = {
+      id,
+      hidden: true,
+      value: '',
+      textContent: '',
+      src: '',
+      className: '',
+      children: [],
+      parentNode: { id: 'mock-parent' },
+      style: {},
+      classList: {
+        add: (c) => classes.add(c),
+        remove: (c) => classes.delete(c),
+        toggle: (c, force) => (force ? classes.add(c) : classes.delete(c)),
+        has: (c) => classes.has(c),
+      },
+      getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+      hasAttribute: (k) => attrs.has(k),
+      removeAttribute: (k) => attrs.delete(k),
+      setAttribute: (k, v) => attrs.set(k, String(v)),
+      addEventListener: (type, fn) => {
+        if (!elListeners.has(type)) elListeners.set(type, []);
+        elListeners.get(type).push(fn);
+      },
+      dispatch: async (type, event = { preventDefault() {} }) => {
+        for (const fn of elListeners.get(type) || []) {
+          await fn(event);
+        }
+      },
+      appendChild: (child) => {
+        child.parentNode = el;
+        el.children.push(child);
+      },
+      set innerHTML(val) {
+        if (val === '') el.children = [];
+      },
+      get innerHTML() {
+        return '';
+      },
+      ...initial,
+    };
+    if (id) elements.set(id, el);
+    return el;
+  }
+
+  for (const id of [
+    'proctor-app',
+    'missing-exam-view',
+    'blocked-view',
+    'blocked-reasons',
+    'start-gate',
+    'policy-summary',
+    'start-error',
+    'start-form',
+    'student-name',
+    'roll-id',
+    'exam-pin',
+    'exam-stage',
+    'exam-iframe',
+    'stealth-watermark-layer',
+    'ai-canary-layer',
+    'moire-shield-layer',
+    'proctor-hud',
+    'hud-video',
+    'camera-status-dot',
+    'camera-status-text',
+    'mic-meter-fill',
+    'strike-pill',
+    'reenter-fullscreen-btn',
+    'malpractice-toast',
+    'lockout-overlay',
+    'lockout-message',
+    'unlock-error',
+    'unlock-form',
+    'unlock-pin-input',
+  ]) {
+    makeDomEl(id, {
+      hidden: false,
+      className:
+        id === 'stealth-watermark-layer' || id === 'ai-canary-layer' || id === 'moire-shield-layer'
+          ? id
+          : '',
+    });
+  }
+
+  elements.get('student-name').value = 'Kiran Rao';
+  elements.get('roll-id').value = '261NS1A1405';
+  elements.get('exam-pin').value = 'EXM-BC-2026';
+
+  const mockDoc = {
+    location: { href: examUrl },
+    visibilityState: 'visible',
+    fullscreenElement: { id: 'root' },
+    hasFocus: () => true,
+    documentElement: { requestFullscreen: () => Promise.resolve() },
+    body: {},
+    getElementById: (id) => elements.get(id) || null,
+    createElement: (tag) => makeDomEl('', { tagName: tag.toUpperCase(), hidden: false }),
+    addEventListener() {},
+  };
+
+  class MockBroadcastChannel {
+    addEventListener(type, fn) {
+      if (type === 'message') channelListeners.push(fn);
+    }
+    postMessage(msg) {
+      postedMessages.push(msg);
+    }
+  }
+
+  class MockMutationObserver {
+    constructor(cb) {
+      observerCallbacks.push(cb);
+    }
+    observe() {}
+  }
+
+  const mockWin = {
+    location: { href: examUrl },
+    innerWidth: 1920,
+    innerHeight: 1080,
+    screen: { width: 1920, height: 1080, isExtended: false },
+    setInterval: () => 1,
+    BroadcastChannel: MockBroadcastChannel,
+    MutationObserver: MockMutationObserver,
+    navigator: {
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+      webdriver: false,
+      mediaDevices: {
+        getUserMedia: async () => ({
+          getVideoTracks: () => [{ label: 'Integrated Camera', readyState: 'live', muted: false, stop() {} }],
+          getAudioTracks: () => [{ label: 'Built-in Mic', readyState: 'live', muted: false, stop() {} }],
+          getTracks: () => [{ stop() {} }],
+        }),
+      },
+    },
+    addEventListener() {},
+  };
+
+  initStudentPage(mockDoc, mockWin);
+  await elements.get('start-form').dispatch('submit', { preventDefault() {} });
+
+  // 1. Receiving PROCTOR_ACTIVE from another tab triggers DUPLICATE_TAB_DETECTED AND replies with PROCTOR_ACK
+  const activeAnnounce = postedMessages.find((m) => m.type === 'PROCTOR_ACTIVE');
+  assert.ok(activeAnnounce);
+  for (const fn of channelListeners) {
+    fn({ data: { type: 'PROCTOR_ACTIVE', tabId: 'other-tab-123' } });
+  }
+  await new Promise((r) => setTimeout(r, 15));
+  const ackReply = postedMessages.find((m) => m.type === 'PROCTOR_ACK');
+  assert.ok(ackReply, 'Expected PROCTOR_ACK reply when receiving PROCTOR_ACTIVE');
+  assert.equal(ackReply.tabId, activeAnnounce.tabId);
+  assert.equal(elements.get('strike-pill').textContent, 'Strikes: 1 / 5');
+
+  // 2. Receiving PROCTOR_ACK from another tab ALSO triggers DUPLICATE_TAB_DETECTED after cooldown
+  await new Promise((r) => setTimeout(r, 10));
+  // Wait? StrikeEngine has 2500ms cooldown for Date.now(), so let's check PROCTOR_ACK in a separate fresh controller OR check toast?
+  // Wait: let's test PROCTOR_ACK with a fresh page instance!
+  // First verify child stealth-tile style tampering on current page after cooldown or check tamper healing directly:
+  const stealthLayer = elements.get('stealth-watermark-layer');
+  assert.equal(stealthLayer.children.length, 24);
+  stealthLayer.children[0].setAttribute('style', 'display: none !important;');
+
+  // Trigger stealth MutationObserver
+  await new Promise((r) => setTimeout(r, 0));
+  observerCallbacks[0]([]);
+  assert.equal(stealthLayer.children.length, 24);
+  assert.equal(
+    stealthLayer.children[0].getAttribute('style'),
+    null,
+    'Tampered stealth tile must be re-rendered without style attribute'
+  );
+});
+
+test('initStudentPage triggers DUPLICATE_TAB_DETECTED on receiving PROCTOR_ACK and WATERMARK_TAMPERED on child style tamper', async () => {
+  const { examUrl } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'Ack & Tamper Strike Exam',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScAck/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-ACK-2026',
+    unlockPin: 'TCH-ACK-99',
+    maxStrikes: 3,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const makePage = () => {
+    const elements = new Map();
+    const observerCallbacks = [];
+    const channelListeners = [];
+    function makeDomEl(id, initial = {}) {
+      const elListeners = new Map();
+      const classes = new Set();
+      const attrs = new Map();
+      const el = {
+        id,
+        hidden: false,
+        value: '',
+        textContent: '',
+        src: '',
+        className:
+          id === 'stealth-watermark-layer' || id === 'ai-canary-layer' || id === 'moire-shield-layer'
+            ? id
+            : '',
+        children: [],
+        parentNode: { id: 'mock-parent' },
+        style: {},
+        classList: {
+          add: (c) => classes.add(c),
+          remove: (c) => classes.delete(c),
+          toggle: (c, force) => (force ? classes.add(c) : classes.delete(c)),
+          has: (c) => classes.has(c),
+        },
+        getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+        hasAttribute: (k) => attrs.has(k),
+        removeAttribute: (k) => attrs.delete(k),
+        setAttribute: (k, v) => attrs.set(k, String(v)),
+        addEventListener: (type, fn) => {
+          if (!elListeners.has(type)) elListeners.set(type, []);
+          elListeners.get(type).push(fn);
+        },
+        dispatch: async (type, event = { preventDefault() {} }) => {
+          for (const fn of elListeners.get(type) || []) {
+            await fn(event);
+          }
+        },
+        appendChild: (child) => {
+          child.parentNode = el;
+          el.children.push(child);
+        },
+        set innerHTML(val) {
+          if (val === '') el.children = [];
+        },
+        get innerHTML() {
+          return '';
+        },
+        ...initial,
+      };
+      if (id) elements.set(id, el);
+      return el;
+    }
+
+    for (const id of [
+      'proctor-app',
+      'missing-exam-view',
+      'blocked-view',
+      'blocked-reasons',
+      'start-gate',
+      'policy-summary',
+      'start-error',
+      'start-form',
+      'student-name',
+      'roll-id',
+      'exam-pin',
+      'exam-stage',
+      'exam-iframe',
+      'stealth-watermark-layer',
+      'ai-canary-layer',
+      'moire-shield-layer',
+      'proctor-hud',
+      'hud-video',
+      'camera-status-dot',
+      'camera-status-text',
+      'mic-meter-fill',
+      'strike-pill',
+      'reenter-fullscreen-btn',
+      'malpractice-toast',
+      'lockout-overlay',
+      'lockout-message',
+      'unlock-error',
+      'unlock-form',
+      'unlock-pin-input',
+    ]) {
+      makeDomEl(id);
+    }
+
+    const mockDoc = {
+      location: { href: examUrl },
+      visibilityState: 'visible',
+      fullscreenElement: { id: 'root' },
+      hasFocus: () => true,
+      documentElement: { requestFullscreen: () => Promise.resolve() },
+      body: {},
+      getElementById: (id) => elements.get(id) || null,
+      createElement: (tag) => makeDomEl('', { tagName: tag.toUpperCase() }),
+      addEventListener() {},
+    };
+
+    const mockWin = {
+      location: { href: examUrl },
+      innerWidth: 1920,
+      innerHeight: 1080,
+      screen: { width: 1920, height: 1080, isExtended: false },
+      setInterval: () => 1,
+      BroadcastChannel: class {
+        addEventListener(type, fn) {
+          if (type === 'message') channelListeners.push(fn);
+        }
+        postMessage() {}
+      },
+      MutationObserver: class {
+        constructor(cb) {
+          observerCallbacks.push(cb);
+        }
+        observe() {}
+      },
+      navigator: {
+        userAgent:
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+        webdriver: false,
+        mediaDevices: {
+          getUserMedia: async () => ({
+            getVideoTracks: () => [{ label: 'Integrated Camera', readyState: 'live', muted: false, stop() {} }],
+            getAudioTracks: () => [{ label: 'Built-in Mic', readyState: 'live', muted: false, stop() {} }],
+            getTracks: () => [{ stop() {} }],
+          }),
+        },
+      },
+      addEventListener() {},
+    };
+
+    return { elements, observerCallbacks, channelListeners, mockDoc, mockWin };
+  };
+
+  // Case A: PROCTOR_ACK triggers DUPLICATE_TAB_DETECTED strike
+  const pageA = makePage();
+  pageA.elements.get('student-name').value = 'Student Ack';
+  pageA.elements.get('roll-id').value = '261NS1A1406';
+  pageA.elements.get('exam-pin').value = 'EXM-ACK-2026';
+  initStudentPage(pageA.mockDoc, pageA.mockWin);
+  await pageA.elements.get('start-form').dispatch('submit', { preventDefault() {} });
+  for (const fn of pageA.channelListeners) {
+    fn({ data: { type: 'PROCTOR_ACK', tabId: 'tab-remote-99' } });
+  }
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(pageA.elements.get('strike-pill').textContent, 'Strikes: 1 / 3');
+  assert.match(pageA.elements.get('malpractice-toast').textContent, /DUPLICATE_TAB_DETECTED/);
+
+  // Case B: Child stealth-tile style attribute tampering triggers WATERMARK_TAMPERED strike
+  const pageB = makePage();
+  pageB.elements.get('student-name').value = 'Student Tamper';
+  pageB.elements.get('roll-id').value = '261NS1A1407';
+  pageB.elements.get('exam-pin').value = 'EXM-ACK-2026';
+  initStudentPage(pageB.mockDoc, pageB.mockWin);
+  await pageB.elements.get('start-form').dispatch('submit', { preventDefault() {} });
+  await new Promise((r) => setTimeout(r, 0));
+  pageB.elements.get('stealth-watermark-layer').children[3].setAttribute('style', 'opacity: 0');
+  pageB.observerCallbacks[0]([]);
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(pageB.elements.get('strike-pill').textContent, 'Strikes: 1 / 3');
+  assert.match(pageB.elements.get('malpractice-toast').textContent, /WATERMARK_TAMPERED/);
+});
+
+test('index.html and setup.html display AMET University 261NS1A14PD institutional branding and banner', () => {
+  const indexHtml = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const setupHtml = fs.readFileSync(new URL('../setup.html', import.meta.url), 'utf8');
+
+  for (const [name, html] of [
+    ['index.html', indexHtml],
+    ['setup.html', setupHtml],
+  ]) {
+    assert.ok(html.includes('261NS1A14PD'), `${name} must include paper code 261NS1A14PD`);
+    assert.ok(html.includes('AMET University'), `${name} must include AMET University branding`);
+    assert.ok(
+      html.includes('./assets/amet-banner.jpg'),
+      `${name} must reference ./assets/amet-banner.jpg`
+    );
+  }
+});
