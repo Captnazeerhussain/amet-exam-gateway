@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Exam Proctor — Teacher Setup &amp; Forensic Decoder</title>
+  <link rel="stylesheet" href="./styles/proctor.css" />
+</head>
+<body class="proctor-body">
+  <main class="setup-shell">
+    <header class="setup-header">
+      <div class="badge-pill">Zero-Install Exam Proctor</div>
+      <h1>Teacher Exam Link Generator</h1>
+      <p class="subtitle">
+        Encrypt your Google Form link inside a tamper-resistant student URL, enable live Google Sheet &amp; Gmail malpractice alerts, or decode leaked exam screenshots.
+      </p>
+    </header>
+
+    <section class="proctor-card" aria-labelledby="setup-heading">
+      <h2 id="setup-heading" class="card-title">1. Configure Encrypted Exam Link</h2>
+
+      <div id="setup-error" class="alert-banner alert-error" role="alert" hidden></div>
+
+      <form id="setup-form" class="setup-form" novalidate>
+        <div class="form-grid">
+          <div class="field-group field-span-2">
+            <label for="exam-title">Exam Title</label>
+            <input
+              id="exam-title"
+              name="examTitle"
+              type="text"
+              required
+              placeholder="e.g. CS-201 Midterm Algorithms Exam"
+              autocomplete="off"
+            />
+          </div>
+
+          <div class="field-group field-span-2">
+            <label for="form-url">Google Form Link (full URL)</label>
+            <input
+              id="form-url"
+              name="formUrl"
+              type="url"
+              required
+              placeholder="https://docs.google.com/forms/d/e/.../viewform"
+              autocomplete="off"
+            />
+            <span class="field-hint">Use the full <code>docs.google.com/forms/...</code> URL (not a <code>forms.gle</code> shortlink).</span>
+          </div>
+
+          <div class="field-group">
+            <label for="exam-pin">Exam Access Key (Announced at Start)</label>
+            <div class="input-with-action">
+              <input
+                id="exam-pin"
+                name="examPin"
+                type="text"
+                required
+                placeholder="EXM-9X4K-2026"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button type="button" id="gen-exam-key-btn" class="btn btn-secondary">
+                Generate Key
+              </button>
+            </div>
+            <span class="field-hint">AES-256-GCM key students enter to unlock the exam.</span>
+          </div>
+
+          <div class="field-group">
+            <label for="unlock-pin">Teacher Unlock Key (Invigilator Override)</label>
+            <div class="input-with-action">
+              <input
+                id="unlock-pin"
+                name="unlockPin"
+                type="text"
+                required
+                placeholder="TCH-7M2P-9Q4W"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button type="button" id="gen-unlock-key-btn" class="btn btn-secondary">
+                Generate Key
+              </button>
+            </div>
+            <span class="field-hint">Only the invigilator uses this key to unlock a locked-out screen.</span>
+          </div>
+
+          <div class="field-group">
+            <label for="max-strikes">Max Strikes Before Lockout</label>
+            <input
+              id="max-strikes"
+              name="maxStrikes"
+              type="number"
+              min="1"
+              max="10"
+              value="3"
+              required
+            />
+          </div>
+
+          <div class="field-group">
+            <label for="lock-mode">Violation Mode</label>
+            <select id="lock-mode" name="lockMode">
+              <option value="hard-lock" selected>Hard Lock — Lock Screen &amp; Require Teacher Key</option>
+              <option value="warn-only">Warn Only — Warn Student &amp; Log Telemetry</option>
+            </select>
+          </div>
+
+          <div class="field-group field-span-2">
+            <label for="device-policy">Allowed Devices</label>
+            <select id="device-policy" name="devicePolicy">
+              <option value="all-devices" selected>Phones + Laptops (All Devices)</option>
+              <option value="phones-only">Phones Only — Blocks All Desktop Browsers &amp; Extensions</option>
+            </select>
+          </div>
+
+          <div class="field-group field-span-2">
+            <label for="webhook-url">Google Sheet Apps Script Webhook URL (Optional)</label>
+            <input
+              id="webhook-url"
+              name="webhookUrl"
+              type="url"
+              placeholder="https://script.google.com/macros/s/.../exec"
+              autocomplete="off"
+            />
+            <span class="field-hint">Logs live attendance, strikes, lockouts, and sends instant Gmail alerts to you.</span>
+          </div>
+        </div>
+
+        <details class="setup-guide">
+          <summary>1-Minute Google Sheet Audit &amp; Gmail Alert Setup (4 Steps)</summary>
+          <ol class="guide-steps">
+            <li>Open your Google Form&rsquo;s <strong>Responses &rarr; View in Sheets</strong> spreadsheet.</li>
+            <li>Click <strong>Extensions &rarr; Apps Script</strong> and replace the editor code with the script below.</li>
+            <li>
+              <strong>Important for Email Alerts:</strong> Select <code>authorizeEmailAlerts()</code> in the Apps Script toolbar and click <strong>Run</strong> once to grant <code>MailApp</code> permission (required so background <code>doPost</code> webhooks can email you on strikes/lockouts).
+            </li>
+            <li>Click <strong>Deploy &rarr; New deployment &rarr; Web app</strong>, set <em>Who has access</em> to <strong>Anyone</strong>, deploy, and paste the Web App URL above.</li>
+          </ol>
+
+          <div class="code-box-header">
+            <span>apps-script/Code.gs</span>
+            <button type="button" id="copy-script-btn" class="btn btn-secondary btn-sm">
+              Copy Apps Script
+            </button>
+          </div>
+          <pre id="apps-script-code" class="code-block"></pre>
+        </details>
+
+        <div class="form-actions">
+          <button type="submit" id="generate-link-btn" class="btn btn-primary">
+            Generate Encrypted Student Link
+          </button>
+        </div>
+      </form>
+
+      <div id="result-panel" class="result-panel" hidden>
+        <h3>Encrypted Student Exam Link Ready</h3>
+        <p class="field-hint">Share this URL with students before the exam. Keep the Exam Access Key private until start time.</p>
+        <div class="result-row">
+          <input id="student-link-output" type="text" readonly aria-label="Encrypted Student Exam URL" />
+          <button type="button" id="copy-link-btn" class="btn btn-secondary">Copy Student Link</button>
+          <a id="open-link-btn" class="btn btn-primary" href="./" target="_blank" rel="noopener noreferrer">
+            Open Preview
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <section id="decoder-panel" class="proctor-card" aria-labelledby="decoder-heading">
+      <h2 id="decoder-heading" class="card-title">2. Forensic Stealth Watermark Decoder</h2>
+      <p class="subtitle">
+        Upload a leaked exam screenshot or photo to amplify the invisible blue-channel candidate watermark and reveal the exact student Roll ID and Session ID.
+      </p>
+
+      <div class="decoder-controls">
+        <div class="field-group">
+          <label for="decode-image-input">Leaked Screenshot Image</label>
+          <input id="decode-image-input" type="file" accept="image/*" />
+        </div>
+
+        <div class="field-group">
+          <label for="decode-gain">
+            Chromatic Amplification Gain: <strong id="decode-gain-value">24x</strong>
+          </label>
+          <input id="decode-gain" type="range" min="8" max="40" step="1" value="24" />
+        </div>
+      </div>
+
+      <p id="decode-status" class="field-hint">No screenshot loaded yet.</p>
+      <div class="canvas-frame">
+        <canvas id="decode-canvas" hidden></canvas>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="./src/ui/setup-app.js"></script>
+</body>
+</html>
