@@ -976,12 +976,12 @@ test('unlockExam resolves before slow UNLOCK telemetry and grants 3000ms post-un
   });
 
   // Reach 2/2 lockout
-  // Strike 1 & 2 via WINDOW_BLUR (immediate) to reach lockout before testing post-unlock fullscreen grace
+  // Strike 1 & 2 via TAB_HIDDEN (immediate) to reach lockout before testing post-unlock fullscreen grace
   await controller.evaluateTick(
     {
       isFullscreen: false,
       hasFocus: false,
-      visibilityState: 'visible',
+      visibilityState: 'hidden',
       screenWidth: 1920,
       screenHeight: 1080,
       innerWidth: 1920,
@@ -993,7 +993,7 @@ test('unlockExam resolves before slow UNLOCK telemetry and grants 3000ms post-un
     {
       isFullscreen: false,
       hasFocus: false,
-      visibilityState: 'visible',
+      visibilityState: 'hidden',
       screenWidth: 1920,
       screenHeight: 1080,
       innerWidth: 1920,
@@ -2004,8 +2004,10 @@ test('index.html and setup.html display AMET University 261NS1A14PD institutiona
     );
   }
   assert.match(indexHtml, /confirm-environment-checkbox/);
+  assert.match(indexHtml, /google-signin-gate-btn/);
   assert.match(indexHtml, /enter-fullscreen-gate-btn/);
   assert.match(indexHtml, /fullscreen-warning-overlay/);
+  assert.match(setupHtml, /max="20"/);
 });
 
 test('initStudentPage gates Verify Hardware & Begin Examination until Enter Fullscreen & Close Other Tabs is clicked and fullscreen is active', async () => {
@@ -2153,14 +2155,14 @@ test('initStudentPage gates Verify Hardware & Begin Examination until Enter Full
   assert.equal(elements.get('exam-stage').hidden, false);
 });
 
-test('FULLSCREEN_EXITED freezes form and counts down 20s before counting a strike, and clears without strike if restored', async () => {
+test('FULLSCREEN_EXITED freezes form and counts down 10s before counting a strike (even if hasFocus dips), and clears without strike if restored', async () => {
   const { token } = await buildStudentExamUrl('https://proctor.example/setup.html', {
-    title: '261NS1A14PD — Fullscreen 20s Grace',
-    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScFs20/viewform',
+    title: '261NS1A14PD — Fullscreen 10s Grace',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScFs10/viewform',
     webhookUrl: '',
-    examPin: 'EXM-FS20-2026',
-    unlockPin: 'TCH-FS20-9999',
-    maxStrikes: 2,
+    examPin: 'EXM-FS10-2026',
+    unlockPin: 'TCH-FS10-9999',
+    maxStrikes: 10,
     lockMode: 'hard-lock',
     devicePolicy: 'all-devices',
   });
@@ -2174,51 +2176,58 @@ test('FULLSCREEN_EXITED freezes form and counts down 20s before counting a strik
     webdriver: false,
   });
 
-  await controller.startExam({
+  const started = await controller.startExam({
     studentName: 'Ananya Rao',
     rollId: '261NS1A1410',
-    examPin: 'EXM-FS20-2026',
+    examPin: 'EXM-FS10-2026',
     tracks: { videoLabel: 'HD Webcam', videoReadyState: 'live', audioLabel: 'Mic', audioReadyState: 'live' },
   });
+  assert.equal(started.state.maxStrikes, 10);
 
+  // Exits fullscreen at t=1000 (even with brief hasFocus=false while visible): form freezes, 10s warning active, 0 strikes counted
   const w1 = await controller.evaluateTick(
-    { isFullscreen: false, hasFocus: true, visibilityState: 'visible', screenWidth: 1920, screenHeight: 1080, innerWidth: 1920, innerHeight: 1080 },
+    { isFullscreen: false, hasFocus: false, visibilityState: 'visible', screenWidth: 1920, screenHeight: 1080, innerWidth: 1920, innerHeight: 1080 },
     1000
   );
   assert.equal(w1.counted, false);
   assert.equal(w1.freezeForm, true);
   assert.equal(w1.fullscreenWarning, true);
-  assert.equal(w1.fullscreenRemainingSec, 20);
+  assert.equal(w1.fullscreenRemainingSec, 10);
   assert.equal(w1.strikes, 0);
+  assert.equal(w1.maxStrikes, 10);
 
+  // Still out of fullscreen at t=7000 (6s elapsed): still 0 strikes, 4s left
   const w2 = await controller.evaluateTick(
     { isFullscreen: false, hasFocus: true, visibilityState: 'visible', screenWidth: 1920, screenHeight: 1080, innerWidth: 1920, innerHeight: 1080 },
-    15000
+    7000
   );
   assert.equal(w2.counted, false);
-  assert.equal(w2.fullscreenRemainingSec, 6);
+  assert.equal(w2.fullscreenRemainingSec, 4);
   assert.equal(w2.strikes, 0);
 
+  // Returns to fullscreen at t=9000: unfreezes with 0 strikes
   const ok = await controller.evaluateTick(
     { isFullscreen: true, hasFocus: true, visibilityState: 'visible', screenWidth: 1920, screenHeight: 1080, innerWidth: 1920, innerHeight: 1080 },
-    17000
+    9000
   );
   assert.equal(ok.ok, true);
   assert.equal(ok.freezeForm, false);
   assert.equal(ok.fullscreenWarning, false);
   assert.equal(ok.strikes, 0);
 
+  // Exits fullscreen again at t=20000 and stays out past 10s (t=30500) -> NOW counts Strike 1 of 10!
   await controller.evaluateTick(
     { isFullscreen: false, hasFocus: true, visibilityState: 'visible', screenWidth: 1920, screenHeight: 1080, innerWidth: 1920, innerHeight: 1080 },
     20000
   );
-  const strikeAfter20s = await controller.evaluateTick(
+  const strikeAfter10s = await controller.evaluateTick(
     { isFullscreen: false, hasFocus: true, visibilityState: 'visible', screenWidth: 1920, screenHeight: 1080, innerWidth: 1920, innerHeight: 1080 },
-    40000
+    30500
   );
-  assert.equal(strikeAfter20s.counted, true);
-  assert.equal(strikeAfter20s.strikes, 1);
-  assert.equal(strikeAfter20s.locked, false);
+  assert.equal(strikeAfter10s.counted, true);
+  assert.equal(strikeAfter10s.strikes, 1);
+  assert.equal(strikeAfter10s.maxStrikes, 10);
+  assert.equal(strikeAfter10s.locked, false);
 });
 
 test('server-side claim check rejects KEY_ALREADY_USED across fresh Incognito storage', async () => {

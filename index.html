@@ -161,6 +161,12 @@
               </label>
 
               <div class="gate-step-actions">
+                <button type="button" id="google-signin-gate-btn" class="btn btn-secondary btn-block">
+                  Step 0 (If Required): Sign in to Google Account First
+                </button>
+                <div id="google-signin-status" class="field-hint">
+                  If your exam form asks for Google Sign-In, sign in here <strong>before</strong> entering Fullscreen so it does not trigger a strike later.
+                </div>
                 <button type="button" id="enter-fullscreen-gate-btn" class="btn btn-secondary btn-block">
                   Step 1: Enter Fullscreen &amp; Confirm Other Tabs Closed
                 </button>
@@ -234,11 +240,11 @@
           <div class="badge-pill badge-danger">FULLSCREEN DISABLED • RESPONSES FROZEN</div>
           <h2 id="fs-warning-title">Return to Fullscreen Mode Immediately</h2>
           <p class="subtitle">
-            Your examination responses are frozen until Fullscreen mode is restored. Stay out of Fullscreen for 20 seconds and an automatic malpractice strike will be recorded.
+            Your examination responses are frozen until Fullscreen mode is restored. Stay out of Fullscreen for 10 seconds and an automatic malpractice strike will be recorded.
           </p>
           <div class="fs-countdown-box">
             <span>Strike Countdown:</span>
-            <strong id="fs-warning-countdown" class="fs-countdown-badge">20s</strong>
+            <strong id="fs-warning-countdown" class="fs-countdown-badge">10s</strong>
           </div>
           <div class="form-actions">
             <button type="button" id="fs-warning-reenter-btn" class="btn btn-primary btn-block">

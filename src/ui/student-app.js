@@ -25,7 +25,7 @@ const WATERMARK_REFRESH_INTERVAL_MS = 10000;
 const HEARTBEAT_INTERVAL_MS = 15000;
 const TOAST_AUTO_HIDE_MS = 6000;
 const POST_UNLOCK_GRACE_MS = 3000;
-const FULLSCREEN_WARNING_GRACE_MS = 20000;
+const FULLSCREEN_WARNING_GRACE_MS = 10000;
 const CLAIM_TIMEOUT_MS = 3500;
 
 const BLOCKED_REASON_MESSAGES = {
@@ -444,17 +444,27 @@ export function createExamSessionController(deps) {
       ...runtimeSnapshot,
     });
 
+    // When fullscreen is exited on a visible tab (even if Esc/toolbar briefly steals focus),
+    // route to the 10s Fullscreen Freeze Warning instead of an immediate WINDOW_BLUR strike.
+    const effectiveViolation =
+      deviceType !== 'ios' &&
+      !runtimeSnapshot?.isFullscreen &&
+      runtimeSnapshot?.visibilityState === 'visible' &&
+      integrity.violation === 'WINDOW_BLUR'
+        ? 'FULLSCREEN_EXITED'
+        : integrity.violation;
+
     if (unlockGraceUntil !== null) {
       if (
         integrity.ok ||
         currentMs >= unlockGraceUntil ||
-        integrity.violation !== 'FULLSCREEN_EXITED'
+        effectiveViolation !== 'FULLSCREEN_EXITED'
       ) {
         unlockGraceUntil = null;
       } else {
         return {
           ok: false,
-          violation: integrity.violation,
+          violation: effectiveViolation,
           counted: false,
           freezeForm: true,
           fullscreenWarning: false,
@@ -480,7 +490,7 @@ export function createExamSessionController(deps) {
       };
     }
 
-    if (integrity.violation === 'FULLSCREEN_EXITED') {
+    if (effectiveViolation === 'FULLSCREEN_EXITED') {
       if (fullscreenLostAtMs === null) {
         fullscreenLostAtMs = currentMs;
       }
@@ -501,7 +511,7 @@ export function createExamSessionController(deps) {
           ...strikeEngine.getState(),
         };
       }
-      // 20 seconds elapsed without returning to fullscreen: count strike and reset 20s window if still unlocked.
+      // 10 seconds elapsed without returning to fullscreen: count strike and reset 10s window if still unlocked.
       fullscreenLostAtMs = currentMs;
       const fsStrike = await recordViolationAndNotify('FULLSCREEN_EXITED', currentMs, snapshotBase64);
       return {
@@ -510,20 +520,20 @@ export function createExamSessionController(deps) {
         counted: fsStrike.counted,
         freezeForm: true,
         fullscreenWarning: !fsStrike.locked,
-        fullscreenRemainingSec: 20,
+        fullscreenRemainingSec: 10,
         alertMessage: fsStrike.alertMessage,
         ...strikeEngine.getState(),
       };
     }
 
     let strikeResult = null;
-    if (!integrity.ok && integrity.violation) {
-      strikeResult = await recordViolationAndNotify(integrity.violation, currentMs, snapshotBase64);
+    if (!integrity.ok && effectiveViolation) {
+      strikeResult = await recordViolationAndNotify(effectiveViolation, currentMs, snapshotBase64);
     }
 
     return {
       ok: integrity.ok,
-      violation: integrity.violation,
+      violation: effectiveViolation,
       counted: strikeResult ? strikeResult.counted : false,
       freezeForm: false,
       fullscreenWarning: false,
@@ -755,6 +765,8 @@ export function initStudentPage(
   const policySummary = doc.getElementById('policy-summary');
   const startError = doc.getElementById('start-error');
   const startForm = doc.getElementById('start-form');
+  const googleSignInGateBtn = doc.getElementById('google-signin-gate-btn');
+  const googleSignInStatus = doc.getElementById('google-signin-status');
   const enterFullscreenGateBtn = doc.getElementById('enter-fullscreen-gate-btn');
   const fullscreenGateStatus = doc.getElementById('fullscreen-gate-status');
   const startExamBtn = doc.getElementById('start-exam-btn');
@@ -1666,6 +1678,25 @@ export function initStudentPage(
         startExamBtn.disabled = pending || !isGateFullscreenReady();
       }
     };
+
+    if (googleSignInGateBtn) {
+      googleSignInGateBtn.addEventListener('click', () => {
+        try {
+          const popup = win?.open?.(
+            'https://accounts.google.com/',
+            'amet_google_signin',
+            'width=520,height=660'
+          );
+          if (googleSignInStatus) {
+            googleSignInStatus.textContent = popup
+              ? 'Google Sign-In opened. Complete sign-in, close that window, then proceed to Step 1.'
+              : 'Popup blocked — allow popups or sign into accounts.google.com in a tab, close it, then proceed to Step 1.';
+          }
+        } catch {
+          // Ignore popup failures on restricted browsers.
+        }
+      });
+    }
 
     if (enterFullscreenGateBtn) {
       syncPreStartGate();
