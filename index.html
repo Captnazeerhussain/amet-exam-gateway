@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Exam Proctor — Proctored Exam Runner</title>
+  <link rel="stylesheet" href="./styles/proctor.css" />
+</head>
+<body class="proctor-body">
+  <div id="proctor-app" class="proctor-app">
+    <main id="missing-exam-view" class="student-shell" hidden>
+      <section class="proctor-card">
+        <div class="badge-pill">Zero-Install Exam Proctor</div>
+        <h1>No Exam Link Loaded</h1>
+        <p class="subtitle">
+          Open the exact encrypted exam URL provided by your teacher to begin your proctored session.
+        </p>
+        <div class="form-actions" style="margin-top: 1.25rem;">
+          <a href="./setup.html" class="btn btn-primary">Teacher? Create an Encrypted Exam Link &rarr;</a>
+        </div>
+      </section>
+    </main>
+
+    <main id="blocked-view" class="student-shell" hidden>
+      <section class="proctor-card">
+        <div class="badge-pill">Environment Check Failed</div>
+        <h1>Browser or Device Blocked</h1>
+        <p class="subtitle">
+          This exam cannot start in your current browser environment. Follow the steps below and reopen the exam link:
+        </p>
+        <ul id="blocked-reasons" class="blocked-list"></ul>
+        <div class="form-actions" style="margin-top: 1.25rem;">
+          <a href="./setup.html" class="btn btn-secondary">Teacher Setup &rarr;</a>
+        </div>
+      </section>
+    </main>
+
+    <main id="start-gate" class="student-shell" hidden>
+      <section class="proctor-card">
+        <div class="badge-pill">Proctored Exam Gate</div>
+        <h1>Verify Identity &amp; Start Exam</h1>
+        <p id="policy-summary" class="subtitle">
+          Active front camera, microphone, and focus monitoring are required throughout the exam.
+        </p>
+
+        <div id="start-error" class="alert-banner alert-error" role="alert" hidden></div>
+
+        <form id="start-form" class="setup-form" novalidate>
+          <div class="form-grid">
+            <div class="field-group">
+              <label for="student-name">Student Full Name</label>
+              <input
+                id="student-name"
+                name="studentName"
+                type="text"
+                required
+                placeholder="e.g. Riya Patel"
+                autocomplete="name"
+              />
+            </div>
+
+            <div class="field-group">
+              <label for="roll-id">Roll / Student ID</label>
+              <input
+                id="roll-id"
+                name="rollId"
+                type="text"
+                required
+                placeholder="e.g. CS-2026-019"
+                autocomplete="off"
+              />
+            </div>
+
+            <div class="field-group field-span-2">
+              <label for="exam-pin">Exam Access Key (Provided by Teacher)</label>
+              <input
+                id="exam-pin"
+                name="examPin"
+                type="text"
+                required
+                placeholder="EXM-9X4K-2026"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <span class="field-hint">Enter the exact alphanumeric Exam Access Key announced by your invigilator.</span>
+            </div>
+          </div>
+
+          <details class="setup-guide">
+            <summary>Camera or Microphone Blocked? Permission Troubleshooting</summary>
+            <ul class="guide-steps">
+              <li><strong>Chrome (Desktop &amp; Android):</strong> Tap the lock / site-settings icon in the address bar &rarr; <strong>Permissions</strong> &rarr; allow <strong>Camera</strong> and <strong>Microphone</strong>, then retry.</li>
+              <li><strong>iPhone / iPad Safari:</strong> Tap <strong>AA</strong> (or page settings icon) in the address bar &rarr; <strong>Website Settings</strong> &rarr; set <strong>Camera</strong> and <strong>Microphone</strong> to <strong>Allow</strong>.</li>
+              <li>Virtual cameras (OBS, ManyCam, Snap Camera) and in-app browsers (WhatsApp, Instagram) are automatically blocked.</li>
+            </ul>
+          </details>
+
+          <div class="form-actions">
+            <button type="submit" id="start-exam-btn" class="btn btn-primary">
+              Allow Camera, Mic &amp; Start Exam
+            </button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <section id="exam-stage" class="exam-stage" hidden>
+      <iframe
+        id="exam-iframe"
+        class="exam-iframe"
+        referrerpolicy="no-referrer"
+        allow="fullscreen"
+        title="Proctored Google Form Exam"
+      ></iframe>
+
+      <div id="stealth-watermark-layer" class="stealth-watermark-layer" aria-hidden="true"></div>
+      <div id="ai-canary-layer" class="ai-canary-layer" aria-hidden="true"></div>
+      <div id="moire-shield-layer" class="moire-shield-layer" aria-hidden="true"></div>
+
+      <aside id="proctor-hud" class="proctor-hud" aria-label="Live Proctoring Status">
+        <video id="hud-video" class="hud-video" autoplay playsinline muted></video>
+        <div class="hud-meta">
+          <div class="hud-status-row">
+            <span id="camera-status-dot" class="status-dot status-dot-ok" aria-hidden="true"></span>
+            <span id="camera-status-text" class="hud-status-text">Cam Live</span>
+          </div>
+          <div class="mic-meter-track" aria-label="Microphone level">
+            <div id="mic-meter-fill" class="mic-meter-fill"></div>
+          </div>
+          <div id="strike-pill" class="strike-pill">Strikes: 0 / 3</div>
+          <button type="button" id="reenter-fullscreen-btn" class="btn btn-secondary btn-sm" hidden>
+            Re-enter Fullscreen
+          </button>
+        </div>
+      </aside>
+
+      <div id="malpractice-toast" class="malpractice-toast" role="alert" hidden></div>
+
+      <div id="lockout-overlay" class="lockout-overlay" role="dialog" aria-modal="true" aria-labelledby="lockout-title" hidden>
+        <div class="lockout-card">
+          <div class="badge-pill badge-danger">Exam Session Locked</div>
+          <h2 id="lockout-title">Malpractice Lockout</h2>
+          <p id="lockout-message" class="lockout-alert-text"></p>
+          <p class="subtitle">
+            Your answers remain preserved. Ask your invigilator to enter the Teacher Unlock Key below to resume.
+          </p>
+
+          <div id="unlock-error" class="alert-banner alert-error" role="alert" hidden></div>
+
+          <form id="unlock-form" class="setup-form" novalidate>
+            <div class="field-group">
+              <label for="unlock-pin-input">Teacher Unlock Key</label>
+              <input
+                id="unlock-pin-input"
+                name="unlockPin"
+                type="text"
+                required
+                placeholder="TCH-7M2P-9Q4W"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            <div class="form-actions">
+              <button type="submit" id="unlock-submit-btn" class="btn btn-primary">
+                Unlock Exam
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script type="module" src="./src/ui/student-app.js"></script>
+</body>
+</html>

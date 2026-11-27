@@ -77,8 +77,32 @@ function notifyExaminer_(payload) {
     'Session ID: ' + String(payload.sessionId || ''),
   ];
 
+  const emailOptions = {};
+  if (payload.snapshotBase64 && typeof payload.snapshotBase64 === 'string') {
+    try {
+      const b64Data = payload.snapshotBase64
+        .replace(/^data:image\\/[a-zA-Z0-9+.-]+;base64,/, '')
+        .trim();
+      if (b64Data) {
+        const safeRoll = rollId.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const blob = Utilities.newBlob(
+          Utilities.base64Decode(b64Data),
+          'image/jpeg',
+          'malpractice-' + safeRoll + '.jpg'
+        );
+        emailOptions.attachments = [blob];
+      }
+    } catch (blobErr) {
+      Logger.log('Snapshot decode failed: ' + blobErr);
+    }
+  }
+
   try {
-    MailApp.sendEmail(recipient, subject, lines.join('\\n'));
+    if (emailOptions.attachments) {
+      MailApp.sendEmail(recipient, subject, lines.join('\\n'), emailOptions);
+    } else {
+      MailApp.sendEmail(recipient, subject, lines.join('\\n'));
+    }
   } catch (err) {
     Logger.log('MailApp.sendEmail failed: ' + err);
   }
@@ -231,6 +255,7 @@ function doPost(e) {
       reason,
       cameraOk,
       micSpikes,
+      snapshotBase64: data.snapshotBase64,
     });
 
     return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(
