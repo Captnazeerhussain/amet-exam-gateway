@@ -755,6 +755,8 @@ export function initStudentPage(
   const policySummary = doc.getElementById('policy-summary');
   const startError = doc.getElementById('start-error');
   const startForm = doc.getElementById('start-form');
+  const enterFullscreenGateBtn = doc.getElementById('enter-fullscreen-gate-btn');
+  const fullscreenGateStatus = doc.getElementById('fullscreen-gate-status');
   const startExamBtn = doc.getElementById('start-exam-btn');
   const studentNameInput = doc.getElementById('student-name');
   const rollIdInput = doc.getElementById('roll-id');
@@ -1630,12 +1632,65 @@ export function initStudentPage(
 
   if (startForm) {
     let isStarting = false;
+    let hasConfirmedFullscreenGate = !enterFullscreenGateBtn;
+
+    const isGateFullscreenReady = () =>
+      !enterFullscreenGateBtn ||
+      (hasConfirmedFullscreenGate && (!envCheck.supportsFullscreen || isCurrentlyFullscreen()));
+
+    const syncPreStartGate = () => {
+      if (!enterFullscreenGateBtn) {
+        return;
+      }
+      const ready = isGateFullscreenReady();
+      if (startExamBtn && !isStarting) {
+        startExamBtn.disabled = !ready;
+      }
+      if (fullscreenGateStatus) {
+        fullscreenGateStatus.classList?.remove('gate-status-pending', 'gate-status-ok');
+        if (ready) {
+          fullscreenGateStatus.classList?.add('gate-status-ok');
+          fullscreenGateStatus.textContent =
+            'Fullscreen Active & Other Tabs Confirmed — You may now click Verify Hardware & Begin Examination.';
+        } else {
+          fullscreenGateStatus.classList?.add('gate-status-pending');
+          fullscreenGateStatus.textContent =
+            'Step 1 Required: Enter Fullscreen mode first (close all other tabs/apps).';
+        }
+      }
+    };
+
     const setStartPending = (pending) => {
       isStarting = pending;
       if (startExamBtn) {
-        startExamBtn.disabled = pending;
+        startExamBtn.disabled = pending || !isGateFullscreenReady();
       }
     };
+
+    if (enterFullscreenGateBtn) {
+      syncPreStartGate();
+      doc.addEventListener?.('fullscreenchange', () => {
+        if (!isExamActive) {
+          syncPreStartGate();
+        }
+      });
+      enterFullscreenGateBtn.addEventListener('click', async () => {
+        if (startError) {
+          startError.hidden = true;
+          startError.textContent = '';
+        }
+        if (envCheck.supportsFullscreen) {
+          await requestFullscreenSafe();
+        }
+        hasConfirmedFullscreenGate = true;
+        syncPreStartGate();
+        if (envCheck.supportsFullscreen && !isCurrentlyFullscreen() && startError) {
+          startError.textContent =
+            'Browser blocked automatic Fullscreen. Press F11 (or allow Fullscreen) and click Step 1 again.';
+          startError.hidden = false;
+        }
+      });
+    }
 
     startForm.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -1645,6 +1700,16 @@ export function initStudentPage(
       if (startError) {
         startError.hidden = true;
         startError.textContent = '';
+      }
+
+      if (enterFullscreenGateBtn && !isGateFullscreenReady()) {
+        if (startError) {
+          startError.textContent =
+            'Click "Step 1: Enter Fullscreen & Confirm Other Tabs Closed" first and stay in Fullscreen mode before beginning.';
+          startError.hidden = false;
+        }
+        syncPreStartGate();
+        return;
       }
 
       const studentName = studentNameInput?.value || '';

@@ -2004,7 +2004,153 @@ test('index.html and setup.html display AMET University 261NS1A14PD institutiona
     );
   }
   assert.match(indexHtml, /confirm-environment-checkbox/);
+  assert.match(indexHtml, /enter-fullscreen-gate-btn/);
   assert.match(indexHtml, /fullscreen-warning-overlay/);
+});
+
+test('initStudentPage gates Verify Hardware & Begin Examination until Enter Fullscreen & Close Other Tabs is clicked and fullscreen is active', async () => {
+  const { examUrl } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: '261NS1A14PD — Pre-Start Fullscreen Gate',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScFsGate/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-GATE-2026',
+    unlockPin: 'TCH-GATE-99',
+    maxStrikes: 2,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const ids = [
+    'proctor-app',
+    'missing-exam-view',
+    'blocked-view',
+    'blocked-reasons',
+    'start-gate',
+    'policy-summary',
+    'start-error',
+    'start-form',
+    'enter-fullscreen-gate-btn',
+    'fullscreen-gate-status',
+    'start-exam-btn',
+    'student-name',
+    'roll-id',
+    'exam-pin',
+    'confirm-environment-checkbox',
+    'exam-stage',
+    'exam-iframe',
+    'stealth-watermark-layer',
+    'ai-canary-layer',
+    'moire-shield-layer',
+    'proctor-hud',
+    'hud-video',
+    'camera-status-dot',
+    'camera-status-text',
+    'mic-meter-fill',
+    'strike-pill',
+    'reenter-fullscreen-btn',
+    'malpractice-toast',
+    'lockout-overlay',
+    'lockout-message',
+    'unlock-error',
+    'unlock-form',
+    'unlock-pin-input',
+  ];
+
+  const elements = new Map();
+  const makeEl = (id) => ({
+    id,
+    hidden: false,
+    disabled: id === 'start-exam-btn',
+    checked: id === 'confirm-environment-checkbox',
+    textContent: '',
+    value: '',
+    src: '',
+    style: {},
+    children: [],
+    classList: { add() {}, remove() {} },
+    listeners: {},
+    addEventListener(type, fn) {
+      if (!this.listeners[type]) this.listeners[type] = [];
+      this.listeners[type].push(fn);
+    },
+    async dispatch(type, ev = {}) {
+      for (const fn of this.listeners[type] || []) {
+        await fn(ev);
+      }
+    },
+    appendChild(child) {
+      this.children.push(child);
+    },
+  });
+  for (const id of ids) elements.set(id, makeEl(id));
+
+  let isFs = false;
+  let getUserMediaCalls = 0;
+  const docListeners = {};
+  const mockDoc = {
+    location: { href: examUrl },
+    visibilityState: 'visible',
+    fullscreenElement: null,
+    documentElement: {
+      requestFullscreen: async () => {
+        isFs = true;
+        mockDoc.fullscreenElement = mockDoc.documentElement;
+        for (const fn of docListeners.fullscreenchange || []) fn();
+      },
+    },
+    body: {},
+    getElementById: (id) => elements.get(id) || null,
+    createElement: (tag) => makeEl(tag),
+    hasFocus: () => true,
+    addEventListener: (type, fn) => {
+      if (!docListeners[type]) docListeners[type] = [];
+      docListeners[type].push(fn);
+    },
+  };
+  const mockWin = {
+    location: { href: examUrl },
+    screen: { width: 1920, height: 1080, isExtended: false },
+    innerWidth: 1920,
+    innerHeight: 1080,
+    navigator: {
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+      webdriver: false,
+      mediaDevices: {
+        getUserMedia: async () => {
+          getUserMediaCalls += 1;
+          return {
+            getVideoTracks: () => [{ label: 'HD Webcam', readyState: 'live', muted: false }],
+            getAudioTracks: () => [{ label: 'Mic', readyState: 'live', muted: false }],
+          };
+        },
+      },
+    },
+    addEventListener() {},
+    setInterval: () => 1,
+    clearInterval() {},
+  };
+
+  elements.get('student-name').value = 'Kiran Rao';
+  elements.get('roll-id').value = '261NS1A1455';
+  elements.get('exam-pin').value = 'EXM-GATE-2026';
+
+  initStudentPage(mockDoc, mockWin);
+
+  // 1. Before clicking Enter Fullscreen & Close Other Tabs, #start-exam-btn is disabled and submit does not fire getUserMedia
+  assert.equal(elements.get('start-exam-btn').disabled, true);
+  await elements.get('start-form').dispatch('submit', { preventDefault() {} });
+  assert.equal(getUserMediaCalls, 0);
+  assert.equal(elements.get('start-error').hidden, false);
+
+  // 2. Click Enter Fullscreen & Close Other Tabs -> enters fullscreen and enables #start-exam-btn
+  await elements.get('enter-fullscreen-gate-btn').dispatch('click', { preventDefault() {} });
+  assert.equal(isFs, true);
+  assert.equal(elements.get('start-exam-btn').disabled, false);
+
+  // 3. Now submit fires getUserMedia and launches the exam
+  await elements.get('start-form').dispatch('submit', { preventDefault() {} });
+  assert.equal(getUserMediaCalls, 1);
+  assert.equal(elements.get('exam-stage').hidden, false);
 });
 
 test('FULLSCREEN_EXITED freezes form and counts down 20s before counting a strike, and clears without strike if restored', async () => {

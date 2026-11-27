@@ -160,9 +160,18 @@
                 </span>
               </label>
 
+              <div class="gate-step-actions">
+                <button type="button" id="enter-fullscreen-gate-btn" class="btn btn-secondary btn-block">
+                  Step 1: Enter Fullscreen &amp; Confirm Other Tabs Closed
+                </button>
+                <div id="fullscreen-gate-status" class="gate-status-pill gate-status-pending">
+                  Step 1 Required: Enter Fullscreen mode first (close all other tabs/apps).
+                </div>
+              </div>
+
               <div class="form-actions">
-                <button type="submit" id="start-exam-btn" class="btn btn-primary btn-block">
-                  Verify Hardware &amp; Begin Examination
+                <button type="submit" id="start-exam-btn" class="btn btn-primary btn-block" disabled>
+                  Step 2: Verify Hardware &amp; Begin Examination
                 </button>
               </div>
             </form>
