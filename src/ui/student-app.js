@@ -207,7 +207,7 @@ export function createExamSessionController(deps) {
     }
   }
 
-  async function recordViolationAndNotify(reason, nowMs = Date.now(), snapshotBase64 = null) {
+  async function recordViolationAndNotify(reason, nowMs = Date.now(), snapshotOrFn = null) {
     ensureStarted();
     const res = strikeEngine.recordViolation(reason, nowMs);
     if (!res.counted) {
@@ -215,6 +215,17 @@ export function createExamSessionController(deps) {
         ...res,
         alertMessage: null,
       };
+    }
+
+    let snapshotBase64 = null;
+    if (typeof snapshotOrFn === 'function') {
+      try {
+        snapshotBase64 = snapshotOrFn();
+      } catch {
+        snapshotBase64 = null;
+      }
+    } else if (typeof snapshotOrFn === 'string') {
+      snapshotBase64 = snapshotOrFn;
     }
 
     const alertMessage = formatMalpracticeAlert({
@@ -869,19 +880,21 @@ export function initStudentPage(
     return Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
   }
 
-  function updateHudState(state, cameraOkFlag = true, rms = 0) {
+  function updateHudState(state, cameraOkFlag, rms) {
     if (strikePill && state) {
       strikePill.textContent = `Strikes: ${state.strikes} / ${state.maxStrikes}`;
       strikePill.classList?.toggle?.('strike-pill-danger', state.strikes > 0 || state.locked);
     }
-    if (cameraStatusDot) {
-      cameraStatusDot.classList?.toggle?.('status-dot-ok', cameraOkFlag);
-      cameraStatusDot.classList?.toggle?.('status-dot-bad', !cameraOkFlag);
+    if (cameraOkFlag !== undefined) {
+      if (cameraStatusDot) {
+        cameraStatusDot.classList?.toggle?.('status-dot-ok', cameraOkFlag);
+        cameraStatusDot.classList?.toggle?.('status-dot-bad', !cameraOkFlag);
+      }
+      if (cameraStatusText) {
+        cameraStatusText.textContent = cameraOkFlag ? 'Cam Live' : 'Cam Blocked';
+      }
     }
-    if (cameraStatusText) {
-      cameraStatusText.textContent = cameraOkFlag ? 'Cam Live' : 'Cam Blocked';
-    }
-    if (micMeterFill) {
+    if (rms !== undefined && micMeterFill) {
       const pct = Math.min(100, Math.round(rms * 400));
       micMeterFill.style.width = `${pct}%`;
     }
@@ -1053,8 +1066,7 @@ export function initStudentPage(
     if (!isExamActive) {
       return;
     }
-    const snapshot = captureSnapshotBase64();
-    const res = await controller.recordExternalViolation(reason, Date.now(), snapshot);
+    const res = await controller.recordExternalViolation(reason, Date.now(), captureSnapshotBase64);
     updateHudState(res);
     if (res.counted && res.alertMessage) {
       showMalpracticeAlert(res.alertMessage, res);
@@ -1103,7 +1115,7 @@ export function initStudentPage(
         innerHeight: win?.innerHeight || 0,
         screenExtended: Boolean(win?.screen?.isExtended),
       };
-      const tickRes = await controller.evaluateTick(snapshot, Date.now(), captureSnapshotBase64());
+      const tickRes = await controller.evaluateTick(snapshot, Date.now(), captureSnapshotBase64);
       updateHudState(tickRes);
       if (tickRes.counted && tickRes.alertMessage) {
         showMalpracticeAlert(tickRes.alertMessage, tickRes);
@@ -1132,7 +1144,7 @@ export function initStudentPage(
           audioSamples: audioSamples || new Float32Array([0]),
         },
         Date.now(),
-        captureSnapshotBase64()
+        captureSnapshotBase64
       );
       updateHudState(mediaRes, mediaRes.cameraOk, mediaRes.rms);
       if (mediaRes.counted && mediaRes.alertMessage) {
@@ -1171,9 +1183,9 @@ export function initStudentPage(
         event.preventDefault?.();
         if (evtName === 'copy' || evtName === 'cut') {
           try {
-            nav?.clipboard?.writeText?.(
-              'Academic integrity monitored — copying exam content is prohibited.'
-            );
+            nav?.clipboard
+              ?.writeText?.('Academic integrity monitored — copying exam content is prohibited.')
+              ?.catch?.(() => {});
           } catch {
             // Clipboard access may be denied without gesture.
           }
@@ -1349,6 +1361,13 @@ export function initStudentPage(
         startRuntimeMonitors(started.sessionId);
       } catch (err) {
         stopMediaStream(stream);
+        if (hudVideo) {
+          try {
+            hudVideo.srcObject = null;
+          } catch {
+            // Ignore preview detach errors.
+          }
+        }
         const code = err instanceof Error ? err.message : String(err);
         let msg = code;
         if (code === 'INVALID_EXAM_PIN') {

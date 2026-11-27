@@ -591,3 +591,334 @@ test('initStudentPage renders 3 stealth layers, preserves #exam-iframe.src acros
     'https://docs.google.com/forms/d/e/1FAIpQLScDom/viewform?embedded=true'
   );
 });
+
+test('lazy snapshotProvider is invoked ONLY when a strike is counted (never on clean or debounced ticks)', async () => {
+  const { token } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'Lazy Snapshot Exam',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScLazy/viewform',
+    webhookUrl: 'https://script.google.com/macros/s/AKfyLazy/exec',
+    examPin: 'EXM-LAZY-2026',
+    unlockPin: 'TCH-LAZY-99',
+    maxStrikes: 3,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const sentEvents = [];
+  const controller = createExamSessionController({
+    token,
+    storage: createMemoryStorage(),
+    fetchFn: async (_url, init) => {
+      sentEvents.push(JSON.parse(init.body));
+      return { ok: true };
+    },
+  });
+
+  controller.checkEnvironment({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+    webdriver: false,
+  });
+
+  await controller.startExam({
+    studentName: 'Devika Iyer',
+    rollId: 'CS-88',
+    examPin: 'EXM-LAZY-2026',
+    tracks: {
+      videoLabel: 'HD Webcam',
+      videoReadyState: 'live',
+      audioLabel: 'Mic',
+      audioReadyState: 'live',
+    },
+  });
+
+  let snapshotCalls = 0;
+  const snapshotProvider = () => {
+    snapshotCalls += 1;
+    return `data:image/jpeg;base64,SNAP_${snapshotCalls}`;
+  };
+
+  // Clean runtime tick must NOT invoke snapshotProvider
+  const cleanTick = await controller.evaluateTick(
+    {
+      isFullscreen: true,
+      hasFocus: true,
+      visibilityState: 'visible',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    1000,
+    snapshotProvider
+  );
+  assert.equal(cleanTick.ok, true);
+  assert.equal(snapshotCalls, 0);
+
+  // First 2 black frames do NOT reach threshold -> must NOT invoke snapshotProvider
+  const black = makeBlackPixels();
+  const quiet = new Float32Array([0.001, -0.001, 0.001, -0.001]);
+  await controller.evaluateMediaSample({ rgbaPixels: black, audioSamples: quiet }, 2000, snapshotProvider);
+  await controller.evaluateMediaSample({ rgbaPixels: black, audioSamples: quiet }, 4000, snapshotProvider);
+  assert.equal(snapshotCalls, 0);
+
+  // 3rd consecutive black frame counts Strike 1 -> invokes snapshotProvider ONCE
+  const s1 = await controller.evaluateMediaSample(
+    { rgbaPixels: black, audioSamples: quiet },
+    6000,
+    snapshotProvider
+  );
+  assert.equal(s1.counted, true);
+  assert.equal(s1.strikes, 1);
+  assert.equal(snapshotCalls, 1);
+  const strike1Event = sentEvents.find((e) => e.eventType === 'STRIKE' && e.strikes === 1);
+  assert.equal(strike1Event.snapshotBase64, 'data:image/jpeg;base64,SNAP_1');
+
+  // Violation within 2500ms cooldown is debounced -> must NOT invoke snapshotProvider
+  const debounced = await controller.evaluateTick(
+    {
+      isFullscreen: true,
+      hasFocus: false,
+      visibilityState: 'visible',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    7000,
+    snapshotProvider
+  );
+  assert.equal(debounced.counted, false);
+  assert.equal(snapshotCalls, 1);
+
+  // Violation after cooldown counts Strike 2 -> invokes snapshotProvider once more
+  const s2 = await controller.evaluateTick(
+    {
+      isFullscreen: true,
+      hasFocus: false,
+      visibilityState: 'visible',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    10000,
+    snapshotProvider
+  );
+  assert.equal(s2.counted, true);
+  assert.equal(s2.strikes, 2);
+  assert.equal(snapshotCalls, 2);
+});
+
+test('initStudentPage preserves "Cam Blocked" and mic meter level across showMalpracticeAlert and runRuntimeCheck ticks', async () => {
+  const { examUrl } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'HUD Persistence Exam',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScHud/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-HUD-2026',
+    unlockPin: 'TCH-HUD-99',
+    maxStrikes: 3,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const elements = new Map();
+  const scheduledCallbacks = [];
+
+  function makeDomEl(id, initial = {}) {
+    const elListeners = new Map();
+    const classes = new Set();
+    const el = {
+      id,
+      hidden: true,
+      value: '',
+      textContent: '',
+      src: '',
+      className: '',
+      children: [],
+      parentNode: { id: 'mock-parent' },
+      style: {},
+      classList: {
+        add: (c) => classes.add(c),
+        remove: (c) => classes.delete(c),
+        toggle: (c, force) => (force ? classes.add(c) : classes.delete(c)),
+        has: (c) => classes.has(c),
+      },
+      getAttribute: () => null,
+      removeAttribute: () => {},
+      setAttribute: () => {},
+      addEventListener: (type, fn) => {
+        if (!elListeners.has(type)) elListeners.set(type, []);
+        elListeners.get(type).push(fn);
+      },
+      dispatch: async (type, event = { preventDefault() {} }) => {
+        for (const fn of elListeners.get(type) || []) {
+          await fn(event);
+        }
+      },
+      appendChild: (child) => {
+        child.parentNode = el;
+        el.children.push(child);
+      },
+      set innerHTML(val) {
+        if (val === '') el.children = [];
+      },
+      get innerHTML() {
+        return '';
+      },
+      ...initial,
+    };
+    if (id) elements.set(id, el);
+    return el;
+  }
+
+  for (const id of [
+    'proctor-app',
+    'missing-exam-view',
+    'blocked-view',
+    'blocked-reasons',
+    'start-gate',
+    'policy-summary',
+    'start-error',
+    'start-form',
+    'student-name',
+    'roll-id',
+    'exam-pin',
+    'exam-stage',
+    'exam-iframe',
+    'stealth-watermark-layer',
+    'ai-canary-layer',
+    'moire-shield-layer',
+    'proctor-hud',
+    'hud-video',
+    'camera-status-dot',
+    'camera-status-text',
+    'mic-meter-fill',
+    'strike-pill',
+    'reenter-fullscreen-btn',
+    'malpractice-toast',
+    'lockout-overlay',
+    'lockout-message',
+    'unlock-error',
+    'unlock-form',
+    'unlock-pin-input',
+  ]) {
+    makeDomEl(id);
+  }
+
+  elements.get('hud-video').readyState = 4;
+  elements.get('student-name').value = 'Zoya Khan';
+  elements.get('roll-id').value = 'CS-33';
+  elements.get('exam-pin').value = 'EXM-HUD-2026';
+
+  let snapshotEncodeCount = 0;
+  const blackFrameBuffer = new Uint8ClampedArray(32 * 24 * 4);
+  const mockCanvas = {
+    width: 0,
+    height: 0,
+    getContext: () => ({
+      drawImage() {},
+      getImageData: () => ({ data: blackFrameBuffer }),
+    }),
+    toDataURL: () => {
+      snapshotEncodeCount += 1;
+      return 'data:image/jpeg;base64,CAM_COVERED';
+    },
+  };
+
+  const mockDoc = {
+    location: { href: examUrl },
+    visibilityState: 'visible',
+    fullscreenElement: { id: 'root' },
+    hasFocus: () => true,
+    documentElement: {
+      requestFullscreen: () => Promise.resolve(),
+    },
+    body: {},
+    getElementById: (id) => elements.get(id) || null,
+    createElement: (tag) =>
+      tag === 'canvas' ? mockCanvas : makeDomEl('', { tagName: tag.toUpperCase() }),
+    addEventListener() {},
+  };
+
+  const mockWin = {
+    location: { href: examUrl },
+    innerWidth: 1920,
+    innerHeight: 1080,
+    screen: { width: 1920, height: 1080, isExtended: false },
+    setInterval: (fn, ms) => {
+      scheduledCallbacks.push({ fn, ms });
+      return scheduledCallbacks.length;
+    },
+    AudioContext: function MockAudioCtx() {
+      return {
+        state: 'running',
+        currentTime: 0,
+        destination: {},
+        createMediaStreamSource: () => ({ connect() {} }),
+        createAnalyser: () => ({
+          fftSize: 256,
+          getFloatTimeDomainData: (arr) => {
+            // Steady audible room noise (rms = 0.05 -> 20% bar width, below 0.08 speech threshold)
+            for (let i = 0; i < arr.length; i += 1) {
+              arr[i] = i % 2 === 0 ? 0.05 : -0.05;
+            }
+          },
+        }),
+        createOscillator: () => ({
+          type: 'sawtooth',
+          frequency: { setValueAtTime() {} },
+          connect() {},
+          start() {},
+          stop() {},
+        }),
+        createGain: () => ({
+          gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} },
+          connect() {},
+        }),
+      };
+    },
+    navigator: {
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+      webdriver: false,
+      mediaDevices: {
+        getUserMedia: async () => ({
+          getVideoTracks: () => [{ label: 'Integrated Camera', readyState: 'live', muted: false, stop() {} }],
+          getAudioTracks: () => [{ label: 'Built-in Mic', readyState: 'live', muted: false, stop() {} }],
+          getTracks: () => [{ stop() {} }],
+        }),
+      },
+    },
+    addEventListener() {},
+  };
+
+  initStudentPage(mockDoc, mockWin);
+  await elements.get('start-form').dispatch('submit', { preventDefault() {} });
+
+  const runtimeCheck = scheduledCallbacks.find((c) => c.ms === 350).fn;
+  const mediaCheck = scheduledCallbacks.find((c) => c.ms === 2000).fn;
+  const baselineSnapshots = snapshotEncodeCount;
+
+  // Clean runtime checks must never trigger eager JPEG snapshot encoding
+  await runtimeCheck();
+  await runtimeCheck();
+  assert.equal(snapshotEncodeCount, baselineSnapshots);
+
+  // 3 consecutive covered camera samples -> triggers CAMERA_COVERED strike & sets Cam Blocked
+  await mediaCheck();
+  await mediaCheck();
+  assert.equal(snapshotEncodeCount, baselineSnapshots);
+  await mediaCheck();
+  assert.equal(snapshotEncodeCount, baselineSnapshots + 1);
+
+  assert.equal(elements.get('camera-status-text').textContent, 'Cam Blocked');
+  assert.equal(elements.get('camera-status-dot').classList.has('status-dot-bad'), true);
+  assert.equal(elements.get('mic-meter-fill').style.width, '20%');
+
+  // Subsequent runtime check (with no camera/mic args) MUST preserve Cam Blocked & 20% mic bar
+  await runtimeCheck();
+  assert.equal(elements.get('camera-status-text').textContent, 'Cam Blocked');
+  assert.equal(elements.get('camera-status-dot').classList.has('status-dot-bad'), true);
+  assert.equal(elements.get('mic-meter-fill').style.width, '20%');
+});
