@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "backend": "node server/proctor-backend.js",
+    "frontend": "python -m http.server 8420 --bind 127.0.0.1"
   }
 }

@@ -320,8 +320,11 @@ export async function createExamEnvelope(config) {
     } catch {
       throw new Error('Webhook URL must use https://');
     }
-    if (parsedWebhook.protocol !== 'https:') {
-      throw new Error('Webhook URL must use https://');
+    const isLocalhostHttp =
+      parsedWebhook.protocol === 'http:' &&
+      (parsedWebhook.hostname === 'localhost' || parsedWebhook.hostname === '127.0.0.1');
+    if (parsedWebhook.protocol !== 'https:' && !isLocalhostHttp) {
+      throw new Error('Webhook URL must use https:// (or http://localhost for local testing)');
     }
   }
 
