@@ -956,6 +956,75 @@ pre {
   margin: 0.6rem 0 0.8rem;
 }
 
+.confirm-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.75rem 0.85rem;
+  margin-bottom: 1rem;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  font-size: 0.83rem;
+  line-height: 1.45;
+  color: var(--navy);
+  cursor: pointer;
+}
+
+.confirm-check-row input[type='checkbox'] {
+  margin-top: 0.2rem;
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  accent-color: var(--navy);
+}
+
+.fullscreen-warning-overlay {
+  position: fixed;
+  inset: 48px 0 0 0;
+  z-index: 58;
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+}
+
+.fullscreen-warning-card {
+  width: min(500px, 100%);
+  background: var(--surface);
+  border: 2px solid #d97706;
+  border-top: 6px solid #d97706;
+  border-radius: var(--radius);
+  padding: 1.65rem;
+  box-shadow: 0 24px 56px rgba(15, 23, 42, 0.45);
+}
+
+.fullscreen-warning-card h2 {
+  margin: 0.65rem 0 0.45rem;
+  color: #b45309;
+}
+
+.fs-countdown-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  margin: 0.9rem 0 1.15rem;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  font-weight: 700;
+  color: #92400e;
+}
+
+.fs-countdown-badge {
+  font-size: 1.4rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--danger);
+}
+
 @media (max-width: 860px) {
   .checkin-card-grid {
     grid-template-columns: 1fr;

@@ -133,6 +133,52 @@ function notifyExaminer_(payload) {
 }
 
 /**
+ * Single-use key/session claim check via GET ?action=claim&rollId=...&examTitle=...
+ * @param {GoogleAppsScript.Events.DoGet} e
+ */
+function doGet(e) {
+  const params = (e && e.parameter) || {};
+  if (params.action !== 'claim') {
+    return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(
+      ContentService.MimeType.JSON
+    );
+  }
+
+  const rollId = sanitizeSheetText_(String(params.rollId || '').trim());
+  const examTitle = sanitizeSheetText_(String(params.examTitle || '').trim());
+  if (!rollId || !examTitle) {
+    return ContentService.createTextOutput(
+      JSON.stringify({ ok: false, allowed: false, reason: 'MISSING_PARAMS' })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const summarySheet = ss.getSheetByName('Proctor_Summary');
+    if (summarySheet && summarySheet.getLastRow() >= 2) {
+      const rows = summarySheet.getRange(2, 1, summarySheet.getLastRow() - 1, 11).getValues();
+      for (let i = 0; i < rows.length; i += 1) {
+        if (
+          sanitizeSheetText_(String(rows[i][0] || '').trim()) === rollId &&
+          sanitizeSheetText_(String(rows[i][2] || '').trim()) === examTitle
+        ) {
+          return ContentService.createTextOutput(
+            JSON.stringify({ ok: false, allowed: false, reason: 'KEY_ALREADY_USED' })
+          ).setMimeType(ContentService.MimeType.JSON);
+        }
+      }
+    }
+    return ContentService.createTextOutput(
+      JSON.stringify({ ok: true, allowed: true })
+    ).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
  * HTTP POST webhook endpoint receiving proctor telemetry events.
  * @param {GoogleAppsScript.Events.DoPost} e
  */

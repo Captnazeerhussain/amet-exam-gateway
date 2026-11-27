@@ -153,6 +153,13 @@
                 Honour Declaration: I affirm that I will complete examination <strong>261NS1A14PD</strong> independently without external assistance and consent to continuous automated proctoring.
               </p>
 
+              <label class="confirm-check-row" for="confirm-environment-checkbox">
+                <input id="confirm-environment-checkbox" type="checkbox" required />
+                <span>
+                  I confirm that I have <strong>closed all other browser tabs, apps, and windows</strong>, unplugged external displays, and understand <strong>Fullscreen mode</strong> is required throughout the examination.
+                </span>
+              </label>
+
               <div class="form-actions">
                 <button type="submit" id="start-exam-btn" class="btn btn-primary btn-block">
                   Verify Hardware &amp; Begin Examination
@@ -212,6 +219,25 @@
       </aside>
 
       <div id="malpractice-toast" class="malpractice-toast" role="alert" hidden></div>
+
+      <div id="fullscreen-warning-overlay" class="fullscreen-warning-overlay" role="alertdialog" aria-modal="true" aria-labelledby="fs-warning-title" hidden>
+        <div class="fullscreen-warning-card">
+          <div class="badge-pill badge-danger">FULLSCREEN DISABLED • RESPONSES FROZEN</div>
+          <h2 id="fs-warning-title">Return to Fullscreen Mode Immediately</h2>
+          <p class="subtitle">
+            Your examination responses are frozen until Fullscreen mode is restored. Stay out of Fullscreen for 20 seconds and an automatic malpractice strike will be recorded.
+          </p>
+          <div class="fs-countdown-box">
+            <span>Strike Countdown:</span>
+            <strong id="fs-warning-countdown" class="fs-countdown-badge">20s</strong>
+          </div>
+          <div class="form-actions">
+            <button type="button" id="fs-warning-reenter-btn" class="btn btn-primary btn-block">
+              Return to Fullscreen Now
+            </button>
+          </div>
+        </div>
+      </div>
 
       <div id="lockout-overlay" class="lockout-overlay" role="dialog" aria-modal="true" aria-labelledby="lockout-title" hidden>
         <div class="lockout-card">

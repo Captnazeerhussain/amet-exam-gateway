@@ -97,6 +97,25 @@ test('Proctor Backend server ingests START, STRIKE, and LOCKOUT webhooks and ser
     assert.equal(state.events.length, 2);
     assert.equal(state.alerts.length, 1);
     assert.match(state.alerts[0].subject, /MALPRACTICE ALERT/);
+
+    // 4. Verify GET /api/webhook?action=claim blocks duplicate key/roll entry once started
+    const claimDup = await fetch(
+      `${baseUrl}/api/webhook?action=claim&rollId=261NS1A1401&examTitle=${encodeURIComponent(
+        '261NS1A14PD — AMET University B.Sc. 25 Examination'
+      )}`
+    );
+    assert.equal(claimDup.status, 200);
+    const claimDupJson = await claimDup.json();
+    assert.equal(claimDupJson.allowed, false);
+    assert.equal(claimDupJson.reason, 'KEY_ALREADY_USED');
+
+    const claimNew = await fetch(
+      `${baseUrl}/api/webhook?action=claim&rollId=261NS1A1499&examTitle=${encodeURIComponent(
+        '261NS1A14PD — AMET University B.Sc. 25 Examination'
+      )}`
+    );
+    const claimNewJson = await claimNew.json();
+    assert.equal(claimNewJson.allowed, true);
   } finally {
     backend.server.close();
   }

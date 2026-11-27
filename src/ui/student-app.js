@@ -25,6 +25,8 @@ const WATERMARK_REFRESH_INTERVAL_MS = 10000;
 const HEARTBEAT_INTERVAL_MS = 15000;
 const TOAST_AUTO_HIDE_MS = 6000;
 const POST_UNLOCK_GRACE_MS = 3000;
+const FULLSCREEN_WARNING_GRACE_MS = 20000;
+const CLAIM_TIMEOUT_MS = 3500;
 
 const BLOCKED_REASON_MESSAGES = {
   AUTOMATION_DETECTED:
@@ -191,6 +193,7 @@ export function createExamSessionController(deps) {
   let consecutiveBlackFrames = 0;
   let consecutiveSpeechSpikes = 0;
   let unlockGraceUntil = null;
+  let fullscreenLostAtMs = null;
 
   function ensureStarted() {
     if (!strikeEngine || !telemetryClient) {
@@ -312,10 +315,48 @@ export function createExamSessionController(deps) {
     }
 
     const sessionLookupKey = `proctor_session_${cleanRoll}_${meta.unlockHash.slice(0, 16)}`;
-    const existingSessionId = safeStorageGet(sessionStore, sessionLookupKey);
-    const isResume = Boolean(existingSessionId);
-    const sessionId = existingSessionId || generateSessionId();
+    const usedKey = `proctor_used_${meta.unlockHash.slice(0, 16)}`;
+    if (safeStorageGet(sessionStore, sessionLookupKey) || safeStorageGet(sessionStore, usedKey)) {
+      throw new Error('KEY_ALREADY_USED');
+    }
+
+    // Server-side single-use claim check (blocks reopening in Incognito/another browser when webhookUrl is set)
+    if (decrypted.webhookUrl && typeof (deps.fetchFn || globalThis.fetch) === 'function') {
+      const fetchFn = deps.fetchFn || ((u, i) => globalThis.fetch(u, i));
+      const controllerAbort = typeof AbortController === 'function' ? new AbortController() : null;
+      const claimTimer = controllerAbort
+        ? setTimeout(() => controllerAbort.abort(), CLAIM_TIMEOUT_MS)
+        : null;
+      try {
+        const claimUrl = new URL(decrypted.webhookUrl);
+        claimUrl.searchParams.set('action', 'claim');
+        claimUrl.searchParams.set('rollId', cleanRoll);
+        claimUrl.searchParams.set('examTitle', decrypted.title);
+        const claimRes = await fetchFn(claimUrl.toString(), {
+          method: 'GET',
+          signal: controllerAbort?.signal,
+        });
+        if (claimRes && claimRes.ok && typeof claimRes.json === 'function') {
+          const claimData = await claimRes.json();
+          if (claimData && claimData.allowed === false && claimData.reason === 'KEY_ALREADY_USED') {
+            throw new Error('KEY_ALREADY_USED');
+          }
+        }
+      } catch (claimErr) {
+        if (claimErr instanceof Error && claimErr.message === 'KEY_ALREADY_USED') {
+          throw claimErr;
+        }
+        // Fail open on transient offline/CORS errors so honest students on flaky Wi-Fi are not blocked.
+      } finally {
+        if (claimTimer) {
+          clearTimeout(claimTimer);
+        }
+      }
+    }
+
+    const sessionId = generateSessionId();
     safeStorageSet(sessionStore, sessionLookupKey, sessionId);
+    safeStorageSet(sessionStore, usedKey, cleanRoll);
 
     activeStudentName = cleanName;
     activeRollId = cleanRoll;
@@ -326,6 +367,7 @@ export function createExamSessionController(deps) {
     consecutiveBlackFrames = 0;
     consecutiveSpeechSpikes = 0;
     unlockGraceUntil = null;
+    fullscreenLostAtMs = null;
 
     strikeEngine = createStrikeEngine({
       sessionKey: `proctor_strikes_${sessionId}`,
@@ -350,7 +392,7 @@ export function createExamSessionController(deps) {
     });
 
     const initialState = strikeEngine.getState();
-    const startEventType = isResume || initialState.history.length > 0 ? 'RESUME' : 'START';
+    const startEventType = initialState.history.length > 0 ? 'RESUME' : 'START';
     const snapshotField =
       typeof snapshotBase64 === 'string' && snapshotBase64.length > 0 ? { snapshotBase64 } : {};
 
@@ -414,11 +456,64 @@ export function createExamSessionController(deps) {
           ok: false,
           violation: integrity.violation,
           counted: false,
+          freezeForm: true,
+          fullscreenWarning: false,
+          fullscreenRemainingSec: 0,
           alertMessage: null,
           gracePeriod: true,
           ...strikeEngine.getState(),
         };
       }
+    }
+
+    if (integrity.ok) {
+      fullscreenLostAtMs = null;
+      return {
+        ok: true,
+        violation: null,
+        counted: false,
+        freezeForm: false,
+        fullscreenWarning: false,
+        fullscreenRemainingSec: 0,
+        alertMessage: null,
+        ...strikeEngine.getState(),
+      };
+    }
+
+    if (integrity.violation === 'FULLSCREEN_EXITED') {
+      if (fullscreenLostAtMs === null) {
+        fullscreenLostAtMs = currentMs;
+      }
+      const elapsedLostMs = currentMs - fullscreenLostAtMs;
+      if (elapsedLostMs < FULLSCREEN_WARNING_GRACE_MS) {
+        const fullscreenRemainingSec = Math.max(
+          1,
+          Math.ceil((FULLSCREEN_WARNING_GRACE_MS - elapsedLostMs) / 1000)
+        );
+        return {
+          ok: false,
+          violation: 'FULLSCREEN_EXITED',
+          counted: false,
+          freezeForm: true,
+          fullscreenWarning: true,
+          fullscreenRemainingSec,
+          alertMessage: null,
+          ...strikeEngine.getState(),
+        };
+      }
+      // 20 seconds elapsed without returning to fullscreen: count strike and reset 20s window if still unlocked.
+      fullscreenLostAtMs = currentMs;
+      const fsStrike = await recordViolationAndNotify('FULLSCREEN_EXITED', currentMs, snapshotBase64);
+      return {
+        ok: false,
+        violation: 'FULLSCREEN_EXITED',
+        counted: fsStrike.counted,
+        freezeForm: true,
+        fullscreenWarning: !fsStrike.locked,
+        fullscreenRemainingSec: 20,
+        alertMessage: fsStrike.alertMessage,
+        ...strikeEngine.getState(),
+      };
     }
 
     let strikeResult = null;
@@ -430,6 +525,9 @@ export function createExamSessionController(deps) {
       ok: integrity.ok,
       violation: integrity.violation,
       counted: strikeResult ? strikeResult.counted : false,
+      freezeForm: false,
+      fullscreenWarning: false,
+      fullscreenRemainingSec: 0,
       alertMessage: strikeResult ? strikeResult.alertMessage : null,
       ...strikeEngine.getState(),
     };
@@ -661,6 +759,7 @@ export function initStudentPage(
   const studentNameInput = doc.getElementById('student-name');
   const rollIdInput = doc.getElementById('roll-id');
   const examPinInput = doc.getElementById('exam-pin');
+  const confirmEnvCheckbox = doc.getElementById('confirm-environment-checkbox');
 
   const examStage = doc.getElementById('exam-stage');
   const examIframe = doc.getElementById('exam-iframe');
@@ -676,6 +775,9 @@ export function initStudentPage(
   const reenterFullscreenBtn = doc.getElementById('reenter-fullscreen-btn');
 
   const malpracticeToast = doc.getElementById('malpractice-toast');
+  const fullscreenWarningOverlay = doc.getElementById('fullscreen-warning-overlay');
+  const fsWarningCountdown = doc.getElementById('fs-warning-countdown');
+  const fsWarningReenterBtn = doc.getElementById('fs-warning-reenter-btn');
   const lockoutOverlay = doc.getElementById('lockout-overlay');
   const lockoutMessage = doc.getElementById('lockout-message');
   const unlockError = doc.getElementById('unlock-error');
@@ -1299,6 +1401,41 @@ export function initStudentPage(
     startDuplicateTabChannel(sessionId);
     requestWakeLockSafe();
 
+    let wasFullscreenWarning = false;
+    const applyFullscreenWarningUI = (active, remainingSec = 20, isLocked = false) => {
+      if (isLocked) {
+        if (fullscreenWarningOverlay) {
+          fullscreenWarningOverlay.hidden = true;
+        }
+        wasFullscreenWarning = false;
+        return;
+      }
+      if (active) {
+        if (examIframe) {
+          examIframe.classList?.add('exam-iframe-locked');
+        }
+        if (fullscreenWarningOverlay) {
+          fullscreenWarningOverlay.hidden = false;
+        }
+        if (fsWarningCountdown) {
+          fsWarningCountdown.textContent = `${remainingSec}s`;
+        }
+        if (!wasFullscreenWarning) {
+          wasFullscreenWarning = true;
+          playWarningBeep();
+          speakMalpracticeWarning();
+        }
+      } else {
+        if (fullscreenWarningOverlay) {
+          fullscreenWarningOverlay.hidden = true;
+        }
+        if (examIframe && !isLocked) {
+          examIframe.classList?.remove('exam-iframe-locked');
+        }
+        wasFullscreenWarning = false;
+      }
+    };
+
     const runRuntimeCheck = async () => {
       if (!isExamActive) {
         return;
@@ -1315,10 +1452,22 @@ export function initStudentPage(
       };
       const tickRes = await controller.evaluateTick(snapshot, Date.now(), captureSnapshotBase64);
       updateHudState(tickRes);
+      if (tickRes.locked) {
+        applyFullscreenWarningUI(false, 0, true);
+        if (tickRes.counted && tickRes.alertMessage) {
+          showMalpracticeAlert(tickRes.alertMessage, tickRes);
+        } else {
+          applyLockoutUI(true);
+        }
+        return;
+      }
+      applyFullscreenWarningUI(
+        Boolean(tickRes.fullscreenWarning),
+        tickRes.fullscreenRemainingSec || 20,
+        false
+      );
       if (tickRes.counted && tickRes.alertMessage) {
         showMalpracticeAlert(tickRes.alertMessage, tickRes);
-      } else if (tickRes.locked) {
-        applyLockoutUI(true);
       }
     };
 
@@ -1385,6 +1534,9 @@ export function initStudentPage(
 
     if (reenterFullscreenBtn) {
       reenterFullscreenBtn.addEventListener('click', () => requestFullscreenSafe());
+    }
+    if (fsWarningReenterBtn) {
+      fsWarningReenterBtn.addEventListener('click', () => requestFullscreenSafe());
     }
 
     // Deterrent: block context menu, clipboard copy/cut/paste, DevTools & PrintScreen/Ctrl+P
@@ -1508,6 +1660,15 @@ export function initStudentPage(
         return;
       }
 
+      if (confirmEnvCheckbox && !confirmEnvCheckbox.checked) {
+        if (startError) {
+          startError.textContent =
+            'Please confirm that you have closed all other tabs, apps, and windows and are ready for Fullscreen mode.';
+          startError.hidden = false;
+        }
+        return;
+      }
+
       setStartPending(true);
       let stream = null;
       try {
@@ -1595,6 +1756,9 @@ export function initStudentPage(
         let msg = code;
         if (code === 'INVALID_EXAM_PIN') {
           msg = 'Incorrect Exam Access Key. Verify the key announced by your teacher and retry.';
+        } else if (code === 'KEY_ALREADY_USED') {
+          msg =
+            'This Examination Access Key has already been used for your Roll Number / browser. Re-opening after closing is blocked.';
         } else if (code === 'VIRTUAL_CAMERA_BLOCKED') {
           msg =
             'Virtual camera detected (e.g. OBS / ManyCam / Snap Camera). Switch to your physical webcam and retry.';

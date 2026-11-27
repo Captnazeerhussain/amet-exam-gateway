@@ -361,6 +361,29 @@ export function createProctorBackendServer() {
       return;
     }
 
+    if (req.method === 'GET' && urlPath === '/api/webhook') {
+      const fullUrl = new URL(req.url || '/api/webhook', 'http://localhost');
+      if (fullUrl.searchParams.get('action') === 'claim') {
+        const qRoll = cleanStr(fullUrl.searchParams.get('rollId'), '');
+        const qTitle = cleanStr(fullUrl.searchParams.get('examTitle'), '');
+        const alreadyExists = Array.from(summaryMap.values()).some(
+          (row) => row.rollId === qRoll && row.examTitle === qTitle
+        );
+        res.writeHead(200, { ...corsHeaders, 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(
+          JSON.stringify(
+            alreadyExists
+              ? { ok: false, allowed: false, reason: 'KEY_ALREADY_USED' }
+              : { ok: true, allowed: true }
+          )
+        );
+        return;
+      }
+      res.writeHead(200, { ...corsHeaders, 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
     if (req.method === 'POST' && urlPath === '/api/webhook') {
       let body = '';
       req.on('data', (chunk) => {

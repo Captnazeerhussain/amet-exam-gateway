@@ -976,10 +976,11 @@ test('unlockExam resolves before slow UNLOCK telemetry and grants 3000ms post-un
   });
 
   // Reach 2/2 lockout
+  // Strike 1 & 2 via WINDOW_BLUR (immediate) to reach lockout before testing post-unlock fullscreen grace
   await controller.evaluateTick(
     {
       isFullscreen: false,
-      hasFocus: true,
+      hasFocus: false,
       visibilityState: 'visible',
       screenWidth: 1920,
       screenHeight: 1080,
@@ -991,7 +992,7 @@ test('unlockExam resolves before slow UNLOCK telemetry and grants 3000ms post-un
   const lockedTick = await controller.evaluateTick(
     {
       isFullscreen: false,
-      hasFocus: true,
+      hasFocus: false,
       visibilityState: 'visible',
       screenWidth: 1920,
       screenHeight: 1080,
@@ -1028,8 +1029,8 @@ test('unlockExam resolves before slow UNLOCK telemetry and grants 3000ms post-un
   assert.equal(graceTick.locked, false);
   assert.equal(graceTick.strikes, 1);
 
-  // After 3000ms grace window expires, !isFullscreen MUST count strike and re-lock
-  const expiredTick = await controller.evaluateTick(
+  // After 3000ms grace window expires, !isFullscreen enters the 20s freeze warning first, then re-locks after 20s
+  const warnTick = await controller.evaluateTick(
     {
       isFullscreen: false,
       hasFocus: true,
@@ -1040,6 +1041,22 @@ test('unlockExam resolves before slow UNLOCK telemetry and grants 3000ms post-un
       innerHeight: 1080,
     },
     13500
+  );
+  assert.equal(warnTick.counted, false);
+  assert.equal(warnTick.freezeForm, true);
+  assert.equal(warnTick.fullscreenWarning, true);
+
+  const expiredTick = await controller.evaluateTick(
+    {
+      isFullscreen: false,
+      hasFocus: true,
+      visibilityState: 'visible',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    34000
   );
   assert.equal(expiredTick.counted, true);
   assert.equal(expiredTick.locked, true);
@@ -1296,31 +1313,34 @@ test('per-exam unlockHash session isolation and default localStorage cross-tab p
 
     assert.notEqual(startA.sessionId, startB.sessionId);
 
-    // Strike on Exam A must not affect Exam B, and must persist to localStorage for reopened tabs
+    // Strike on Exam A must not affect Exam B, and reopening/repasting the link in the same browser must be blocked (single-use key)
     await controllerA.recordExternalViolation('SHORTCUT_BLOCKED', 1000);
     await controllerA.recordExternalViolation('SHORTCUT_BLOCKED', 5000);
 
     const reopenedA = createExamSessionController({ token: tokenA });
-    const resumedA = await reopenedA.startExam({
-      studentName: 'Surya Narayanan',
-      rollId: '261NS1A1401',
-      examPin: 'EXM-ALPHA-01',
-      tracks,
-    });
-    assert.equal(resumedA.sessionId, startA.sessionId);
-    assert.equal(resumedA.state.strikes, 2);
-    assert.equal(resumedA.state.locked, true);
+    await assert.rejects(
+      () =>
+        reopenedA.startExam({
+          studentName: 'Surya Narayanan',
+          rollId: '261NS1A1401',
+          examPin: 'EXM-ALPHA-01',
+          tracks,
+        }),
+      /KEY_ALREADY_USED/
+    );
 
+    // Exam B is also blocked from re-entry once already started in this browser
     const reopenedB = createExamSessionController({ token: tokenB });
-    const resumedB = await reopenedB.startExam({
-      studentName: 'Surya Narayanan',
-      rollId: '261NS1A1401',
-      examPin: 'EXM-BETA-01',
-      tracks,
-    });
-    assert.equal(resumedB.sessionId, startB.sessionId);
-    assert.equal(resumedB.state.strikes, 0);
-    assert.equal(resumedB.state.locked, false);
+    await assert.rejects(
+      () =>
+        reopenedB.startExam({
+          studentName: 'Surya Narayanan',
+          rollId: '261NS1A1401',
+          examPin: 'EXM-BETA-01',
+          tracks,
+        }),
+      /KEY_ALREADY_USED/
+    );
   } finally {
     if (originalLocalStorageDesc) {
       Object.defineProperty(globalThis, 'localStorage', originalLocalStorageDesc);
@@ -1342,14 +1362,17 @@ test('startExam and evaluateTick resolve without waiting on a 5000ms hanging tel
     devicePolicy: 'all-devices',
   });
 
-  let fetchCalls = 0;
+  let postCalls = 0;
   let fetchResolved = 0;
   const pendingTimers = [];
   const controller = createExamSessionController({
     token,
     storage: createMemoryStorage(),
     fetchFn: (_url, init) => {
-      fetchCalls += 1;
+      if (!init || init.method === 'GET') {
+        return Promise.resolve({ ok: true, json: async () => ({ allowed: true }) });
+      }
+      postCalls += 1;
       return new Promise((resolve) => {
         const id = setTimeout(() => {
           fetchResolved += 1;
@@ -1383,7 +1406,7 @@ test('startExam and evaluateTick resolve without waiting on a 5000ms hanging tel
     },
   });
   const startElapsed = performance.now() - tStart0;
-  assert.equal(fetchCalls, 1);
+  assert.equal(postCalls, 1);
   assert.equal(fetchResolved, 0, 'startExam must resolve while fetchFn is still hanging');
   assert.ok(startElapsed < 1000, `Expected startExam < 1000ms (PBKDF2 only), took ${startElapsed.toFixed(1)}ms`);
 
@@ -1980,4 +2003,117 @@ test('index.html and setup.html display AMET University 261NS1A14PD institutiona
       `${name} must reference ./assets/amet-banner.jpg`
     );
   }
+  assert.match(indexHtml, /confirm-environment-checkbox/);
+  assert.match(indexHtml, /fullscreen-warning-overlay/);
+});
+
+test('FULLSCREEN_EXITED freezes form and counts down 20s before counting a strike, and clears without strike if restored', async () => {
+  const { token } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: '261NS1A14PD — Fullscreen 20s Grace',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScFs20/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-FS20-2026',
+    unlockPin: 'TCH-FS20-9999',
+    maxStrikes: 2,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const controller = createExamSessionController({
+    token,
+    storage: createMemoryStorage(),
+  });
+  controller.checkEnvironment({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+    webdriver: false,
+  });
+
+  await controller.startExam({
+    studentName: 'Ananya Rao',
+    rollId: '261NS1A1410',
+    examPin: 'EXM-FS20-2026',
+    tracks: { videoLabel: 'HD Webcam', videoReadyState: 'live', audioLabel: 'Mic', audioReadyState: 'live' },
+  });
+
+  const w1 = await controller.evaluateTick(
+    { isFullscreen: false, hasFocus: true, visibilityState: 'visible', screenWidth: 1920, screenHeight: 1080, innerWidth: 1920, innerHeight: 1080 },
+    1000
+  );
+  assert.equal(w1.counted, false);
+  assert.equal(w1.freezeForm, true);
+  assert.equal(w1.fullscreenWarning, true);
+  assert.equal(w1.fullscreenRemainingSec, 20);
+  assert.equal(w1.strikes, 0);
+
+  const w2 = await controller.evaluateTick(
+    { isFullscreen: false, hasFocus: true, visibilityState: 'visible', screenWidth: 1920, screenHeight: 1080, innerWidth: 1920, innerHeight: 1080 },
+    15000
+  );
+  assert.equal(w2.counted, false);
+  assert.equal(w2.fullscreenRemainingSec, 6);
+  assert.equal(w2.strikes, 0);
+
+  const ok = await controller.evaluateTick(
+    { isFullscreen: true, hasFocus: true, visibilityState: 'visible', screenWidth: 1920, screenHeight: 1080, innerWidth: 1920, innerHeight: 1080 },
+    17000
+  );
+  assert.equal(ok.ok, true);
+  assert.equal(ok.freezeForm, false);
+  assert.equal(ok.fullscreenWarning, false);
+  assert.equal(ok.strikes, 0);
+
+  await controller.evaluateTick(
+    { isFullscreen: false, hasFocus: true, visibilityState: 'visible', screenWidth: 1920, screenHeight: 1080, innerWidth: 1920, innerHeight: 1080 },
+    20000
+  );
+  const strikeAfter20s = await controller.evaluateTick(
+    { isFullscreen: false, hasFocus: true, visibilityState: 'visible', screenWidth: 1920, screenHeight: 1080, innerWidth: 1920, innerHeight: 1080 },
+    40000
+  );
+  assert.equal(strikeAfter20s.counted, true);
+  assert.equal(strikeAfter20s.strikes, 1);
+  assert.equal(strikeAfter20s.locked, false);
+});
+
+test('server-side claim check rejects KEY_ALREADY_USED across fresh Incognito storage', async () => {
+  const { token } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: '261NS1A14PD — Claim Test',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScClaim/viewform',
+    webhookUrl: 'https://script.google.com/macros/s/AKfyClaim/exec',
+    examPin: 'EXM-CLAIM-2026',
+    unlockPin: 'TCH-CLAIM-99',
+    maxStrikes: 3,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const controller = createExamSessionController({
+    token,
+    storage: createMemoryStorage(),
+    fetchFn: async (url, init) => {
+      if (!init || init.method === 'GET') {
+        assert.match(String(url), /action=claim/);
+        return {
+          ok: true,
+          json: async () => ({ ok: false, allowed: false, reason: 'KEY_ALREADY_USED' }),
+        };
+      }
+      return { ok: true };
+    },
+  });
+  controller.checkEnvironment({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+    webdriver: false,
+  });
+
+  await assert.rejects(
+    () =>
+      controller.startExam({
+        studentName: 'Ananya Rao',
+        rollId: '261NS1A1410',
+        examPin: 'EXM-CLAIM-2026',
+        tracks: { videoLabel: 'HD Webcam', videoReadyState: 'live', audioLabel: 'Mic', audioReadyState: 'live' },
+      }),
+    /KEY_ALREADY_USED/
+  );
 });
