@@ -188,3 +188,79 @@ test('telemetryClient serializes concurrent enqueue calls without dropping or du
   assert.deepEqual(sent, ['START', 'HEARTBEAT', 'STRIKE']);
   assert.deepEqual(JSON.parse(storage.getItem('proctor_queue_concurrent')), []);
 });
+
+test('telemetryClient survives QuotaExceededError storage without infinite-looping in runFlush', async () => {
+  const staleRaw = JSON.stringify([
+    {
+      timestamp: '2026-11-27T09:00:00Z',
+      sessionId: 'quota_sess',
+      studentName: 'D',
+      rollId: '4',
+      examTitle: 'T',
+      deviceType: 'android',
+      eventType: 'START',
+    },
+  ]);
+  const quotaStorage = {
+    getItem: () => staleRaw,
+    setItem: () => {
+      const err = new Error('QuotaExceededError');
+      err.name = 'QuotaExceededError';
+      throw err;
+    },
+  };
+
+  const sent = [];
+  const client = createTelemetryClient({
+    webhookUrl: 'https://script.google.com/macros/s/test/exec',
+    sessionMeta: {
+      sessionId: 'quota_sess',
+      studentName: 'D',
+      rollId: '4',
+      examTitle: 'T',
+      deviceType: 'android',
+    },
+    storage: quotaStorage,
+    fetchFn: async (_url, init) => {
+      sent.push(JSON.parse(init.body).eventType);
+      assert.ok(sent.length <= 5, 'runFlush must not infinite-loop on QuotaExceededError');
+      return { ok: true };
+    },
+  });
+
+  const res = await client.enqueue('HEARTBEAT', {}, '2026-11-27T09:01:00Z');
+  assert.deepEqual(res, { delivered: 2, pending: 0 });
+  assert.deepEqual(sent, ['START', 'HEARTBEAT']);
+});
+
+test('telemetryClient passes AbortSignal to fetchFn and aborts stalled requests after timeoutMs', async () => {
+  const storage = createMemoryStorage();
+  let observedSignal = null;
+
+  const client = createTelemetryClient({
+    webhookUrl: 'https://script.google.com/macros/s/test/exec',
+    sessionMeta: {
+      sessionId: 'timeout_sess',
+      studentName: 'E',
+      rollId: '5',
+      examTitle: 'T',
+      deviceType: 'ios',
+    },
+    storage,
+    timeoutMs: 30,
+    fetchFn: (_url, init) =>
+      new Promise((_resolve, reject) => {
+        observedSignal = init.signal;
+        assert.ok(observedSignal && typeof observedSignal.aborted === 'boolean');
+        observedSignal.addEventListener('abort', () => {
+          const err = new Error('Aborted');
+          err.name = 'AbortError';
+          reject(err);
+        });
+      }),
+  });
+
+  const res = await client.enqueue('STRIKE', { strikes: 1 }, '2026-11-27T09:02:00Z');
+  assert.equal(observedSignal.aborted, true);
+  assert.deepEqual(res, { delivered: 0, pending: 1 });
+});

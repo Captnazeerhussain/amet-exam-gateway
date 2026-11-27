@@ -53,7 +53,8 @@ function resolveFetch(providedFetch) {
  *     deviceType: string
  *   },
  *   storage?: { getItem(key: string): string | null, setItem(key: string, value: string): void },
- *   fetchFn?: Function
+ *   fetchFn?: Function,
+ *   timeoutMs?: number
  * }} options
  * @returns {{
  *   enqueue(eventType: string, details?: object, nowIso?: string): Promise<{ delivered: number, pending: number }>,
@@ -64,7 +65,7 @@ export function createTelemetryClient(options) {
   if (!options || typeof options !== 'object') {
     throw new Error('Telemetry client options are required');
   }
-  const { webhookUrl, sessionMeta, storage: providedStorage, fetchFn } = options;
+  const { webhookUrl, sessionMeta, storage: providedStorage, fetchFn, timeoutMs = 6000 } = options;
 
   if (!sessionMeta || typeof sessionMeta !== 'object' || typeof sessionMeta.sessionId !== 'string') {
     throw new Error('sessionMeta with sessionId is required');
@@ -73,10 +74,14 @@ export function createTelemetryClient(options) {
   const targetUrl = typeof webhookUrl === 'string' ? webhookUrl.trim() : '';
   const disabled = targetUrl.length === 0;
   const storageKey = `proctor_queue_${sessionMeta.sessionId}`;
+  const requestTimeoutMs =
+    typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 6000;
 
   let storage = null;
   let sendRequest = null;
   let activeFlush = null;
+  let fallbackRaw = null;
+  let storageOutOfSync = false;
 
   function getStorage() {
     if (!storage) {
@@ -93,11 +98,21 @@ export function createTelemetryClient(options) {
   }
 
   function readQueue() {
-    try {
-      const raw = getStorage().getItem(storageKey);
-      if (!raw) {
-        return [];
+    let raw = null;
+    if (storageOutOfSync) {
+      raw = fallbackRaw;
+    } else {
+      try {
+        raw = getStorage().getItem(storageKey);
+      } catch {
+        storageOutOfSync = true;
+        raw = fallbackRaw;
       }
+    }
+    if (!raw) {
+      return [];
+    }
+    try {
       const parsed = JSON.parse(raw);
       return Array.isArray(parsed) ? parsed : [];
     } catch {
@@ -106,10 +121,13 @@ export function createTelemetryClient(options) {
   }
 
   function writeQueue(queue) {
+    const serialized = JSON.stringify(queue);
+    fallbackRaw = serialized;
     try {
-      getStorage().setItem(storageKey, JSON.stringify(queue));
+      getStorage().setItem(storageKey, serialized);
+      storageOutOfSync = false;
     } catch {
-      // Ignore storage quota/security errors.
+      storageOutOfSync = true;
     }
   }
 
@@ -124,6 +142,13 @@ export function createTelemetryClient(options) {
       }
 
       const nextItem = queue[0];
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      const timerId = controller
+        ? setTimeout(() => {
+            controller.abort();
+          }, requestTimeoutMs)
+        : null;
+
       try {
         await post(targetUrl, {
           method: 'POST',
@@ -132,11 +157,16 @@ export function createTelemetryClient(options) {
             'Content-Type': 'text/plain;charset=utf-8',
           },
           body: JSON.stringify(nextItem),
+          ...(controller ? { signal: controller.signal } : {}),
         });
       } catch {
         const remaining = readQueue();
         writeQueue(remaining);
         return { delivered, pending: remaining.length };
+      } finally {
+        if (timerId !== null) {
+          clearTimeout(timerId);
+        }
       }
 
       // Re-read in case enqueue() appended new events while fetch was awaiting.

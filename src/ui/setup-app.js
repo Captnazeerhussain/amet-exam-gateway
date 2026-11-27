@@ -14,6 +14,29 @@ function authorizeEmailAlerts() {
 }
 
 /**
+ * Neutralize spreadsheet formula injection (CWE-1236) on untrusted text cells.
+ * @param {*} val
+ * @return {string}
+ */
+function sanitizeSheetText_(val) {
+  const text = String(val === undefined || val === null ? '' : val);
+  if (/^[=+\\-@\\t\\r]/.test(text)) {
+    return "'" + text;
+  }
+  return text;
+}
+
+/**
+ * Coerce a numeric input to a non-negative integer, returning 0 on NaN/Infinity.
+ * @param {*} v
+ * @return {number}
+ */
+function toSafeInt_(v) {
+  var n = Number(v);
+  return isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+}
+
+/**
  * Ensure a sheet exists in the spreadsheet and has its header row on row 1.
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
  * @param {string} name
@@ -47,10 +70,11 @@ function notifyExaminer_(payload) {
     return;
   }
 
+  const sessionId = String(payload.sessionId || '');
   const rollId = String(payload.rollId || 'UNKNOWN');
   const studentName = String(payload.studentName || 'Unknown Student');
   const cache = CacheService.getScriptCache();
-  const cacheKey = 'alert_' + rollId + '_' + eventType;
+  const cacheKey = ('alert_' + eventType + '_' + sessionId + '_' + rollId).slice(0, 200);
 
   if (eventType !== 'LOCKOUT' && cache.get(cacheKey)) {
     return;
@@ -74,7 +98,7 @@ function notifyExaminer_(payload) {
     'Camera OK: ' + String(payload.cameraOk ?? ''),
     'Mic Spikes: ' + String(payload.micSpikes ?? 0),
     'Timestamp: ' + String(payload.timestamp || new Date().toISOString()),
-    'Session ID: ' + String(payload.sessionId || ''),
+    'Session ID: ' + sessionId,
   ];
 
   const emailOptions = {};
@@ -113,26 +137,46 @@ function notifyExaminer_(payload) {
  * @param {GoogleAppsScript.Events.DoPost} e
  */
 function doPost(e) {
+  let data;
+  try {
+    const raw = e && e.postData && e.postData.contents ? e.postData.contents : '{}';
+    data = JSON.parse(raw);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error('Invalid JSON payload');
+    }
+  } catch (parseErr) {
+    return ContentService.createTextOutput(
+      JSON.stringify({ ok: false, error: 'INVALID_JSON' })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const rawTimestamp = String(data.timestamp || new Date().toISOString());
+  const rawSessionId = String(data.sessionId || '').trim();
+  const rawRollId = String(data.rollId || '').trim();
+  const rawStudentName = String(data.studentName || '').trim();
+  const rawExamTitle = String(data.examTitle || '').trim();
+  const rawDeviceType = String(data.deviceType || '');
+  const rawEventType = String(data.eventType || '');
+  const rawReason = String(data.reason || '');
+
+  const timestamp = sanitizeSheetText_(rawTimestamp);
+  const sessionId = sanitizeSheetText_(rawSessionId);
+  const rollId = sanitizeSheetText_(rawRollId);
+  const studentName = sanitizeSheetText_(rawStudentName);
+  const examTitle = sanitizeSheetText_(rawExamTitle);
+  const deviceType = sanitizeSheetText_(rawDeviceType);
+  const eventType = sanitizeSheetText_(rawEventType);
+  const reason = sanitizeSheetText_(rawReason);
+
+  const strikes = toSafeInt_(data.strikes);
+  const locked = Boolean(data.locked);
+  const cameraOk = data.cameraOk === undefined ? '' : Boolean(data.cameraOk);
+  const micSpikes = data.micSpikes === undefined ? '' : toSafeInt_(data.micSpikes);
+
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
 
   try {
-    const raw = e && e.postData && e.postData.contents ? e.postData.contents : '{}';
-    const data = JSON.parse(raw);
-
-    const timestamp = String(data.timestamp || new Date().toISOString());
-    const sessionId = String(data.sessionId || '');
-    const rollId = String(data.rollId || '').trim();
-    const studentName = String(data.studentName || '').trim();
-    const examTitle = String(data.examTitle || '').trim();
-    const deviceType = String(data.deviceType || '');
-    const eventType = String(data.eventType || '');
-    const strikes = Number(data.strikes || 0);
-    const locked = Boolean(data.locked);
-    const reason = String(data.reason || '');
-    const cameraOk = data.cameraOk === undefined ? '' : Boolean(data.cameraOk);
-    const micSpikes = data.micSpikes === undefined ? '' : Number(data.micSpikes);
-
     const ss = SpreadsheetApp.getActiveSpreadsheet();
 
     const eventsSheet = ensureSheet_(ss, 'Proctor_Events', [
@@ -175,14 +219,24 @@ function doPost(e) {
       'Strikes',
       'LockedOut',
       'LatestReason',
+      'SessionID',
     ]);
 
     const lastRow = summarySheet.getLastRow();
     let targetRow = -1;
     if (lastRow >= 2) {
-      const rows = summarySheet.getRange(2, 1, lastRow - 1, 10).getValues();
+      const rows = summarySheet.getRange(2, 1, lastRow - 1, 11).getValues();
       for (let i = 0; i < rows.length; i += 1) {
-        if (String(rows[i][0]).trim() === rollId && String(rows[i][2]).trim() === examTitle) {
+        const rowSessionId = sanitizeSheetText_(String(rows[i][10] || '').trim());
+        if (sessionId) {
+          if (rowSessionId === sessionId) {
+            targetRow = i + 2;
+            break;
+          }
+        } else if (
+          sanitizeSheetText_(String(rows[i][0] || '').trim()) === rollId &&
+          sanitizeSheetText_(String(rows[i][2] || '').trim()) === examTitle
+        ) {
           targetRow = i + 2;
           break;
         }
@@ -190,42 +244,45 @@ function doPost(e) {
     }
 
     if (targetRow === -1) {
-      const lockedOut = locked || eventType === 'LOCKOUT' ? 'YES' : eventType === 'UNLOCK' ? 'UNLOCKED' : 'NO';
+      const lockedOut =
+        locked || rawEventType === 'LOCKOUT' ? 'YES' : rawEventType === 'UNLOCK' ? 'UNLOCKED' : 'NO';
       summarySheet.appendRow([
         rollId,
         studentName,
         examTitle,
         deviceType,
         timestamp,
-        eventType === 'HEARTBEAT' ? timestamp : '',
-        eventType === 'HEARTBEAT' ? 1 : 0,
+        rawEventType === 'HEARTBEAT' ? timestamp : '',
+        rawEventType === 'HEARTBEAT' ? 1 : 0,
         strikes,
         lockedOut,
         reason || eventType,
+        sessionId,
       ]);
     } else {
-      const existing = summarySheet.getRange(targetRow, 1, 1, 10).getValues()[0];
-      const nextName = studentName || existing[1];
-      const nextDevice = deviceType || existing[3];
-      const startedAt = existing[4] || timestamp;
-      const lastHeartbeatAt = eventType === 'HEARTBEAT' ? timestamp : existing[5];
-      const heartbeats = (Number(existing[6]) || 0) + (eventType === 'HEARTBEAT' ? 1 : 0);
-      const maxStrikes = Math.max(Number(existing[7]) || 0, strikes);
+      const existing = summarySheet.getRange(targetRow, 1, 1, 11).getValues()[0];
+      const nextName = studentName || sanitizeSheetText_(String(existing[1] || '').trim());
+      const nextDevice = deviceType || sanitizeSheetText_(String(existing[3] || ''));
+      const startedAt = sanitizeSheetText_(String(existing[4] || '')) || timestamp;
+      const lastHeartbeatAt =
+        rawEventType === 'HEARTBEAT' ? timestamp : sanitizeSheetText_(String(existing[5] || ''));
+      const heartbeats = toSafeInt_(existing[6]) + (rawEventType === 'HEARTBEAT' ? 1 : 0);
+      const maxStrikes = Math.max(toSafeInt_(existing[7]), strikes);
       let lockedOut = existing[8] || 'NO';
-      if (locked || eventType === 'LOCKOUT') {
+      if (locked || rawEventType === 'LOCKOUT') {
         lockedOut = 'YES';
-      } else if (eventType === 'UNLOCK') {
+      } else if (rawEventType === 'UNLOCK') {
         lockedOut = 'UNLOCKED';
       }
-      let latestReason = existing[9] || '';
+      let latestReason = sanitizeSheetText_(String(existing[9] || ''));
       if (reason) {
         latestReason = reason;
-      } else if (eventType && eventType !== 'HEARTBEAT') {
+      } else if (eventType && rawEventType !== 'HEARTBEAT') {
         latestReason = eventType;
       }
 
       summarySheet
-        .getRange(targetRow, 1, 1, 10)
+        .getRange(targetRow, 1, 1, 11)
         .setValues([
           [
             rollId,
@@ -238,32 +295,35 @@ function doPost(e) {
             maxStrikes,
             lockedOut,
             latestReason,
+            sessionId || sanitizeSheetText_(String(existing[10] || '').trim()),
           ],
         ]);
     }
 
-    notifyExaminer_({
-      timestamp,
-      sessionId,
-      rollId,
-      studentName,
-      examTitle,
-      deviceType,
-      eventType,
-      strikes,
-      locked,
-      reason,
-      cameraOk,
-      micSpikes,
-      snapshotBase64: data.snapshotBase64,
-    });
-
-    return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(
-      ContentService.MimeType.JSON
-    );
+    SpreadsheetApp.flush();
   } finally {
     lock.releaseLock();
   }
+
+  notifyExaminer_({
+    timestamp: rawTimestamp,
+    sessionId: rawSessionId,
+    rollId: rawRollId,
+    studentName: rawStudentName,
+    examTitle: rawExamTitle,
+    deviceType: rawDeviceType,
+    eventType: rawEventType,
+    strikes,
+    locked,
+    reason: rawReason,
+    cameraOk,
+    micSpikes,
+    snapshotBase64: data.snapshotBase64,
+  });
+
+  return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(
+    ContentService.MimeType.JSON
+  );
 }`;
 
 /**
@@ -330,9 +390,10 @@ export async function buildStudentExamUrl(setupPageUrl, config) {
  */
 async function copyWithFeedback(text, button, defaultLabel) {
   try {
-    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
+    if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+      throw new Error('Clipboard API unavailable');
     }
+    await navigator.clipboard.writeText(text);
     if (button) {
       button.textContent = 'Copied!';
       setTimeout(() => {
@@ -469,6 +530,7 @@ export function initSetupPage(doc = typeof document !== 'undefined' ? document :
 
   // Forensic Stealth Watermark Decoder
   let sourceImageData = null;
+  let loadSeq = 0;
 
   function renderDecodedCanvas() {
     if (!sourceImageData || !decodeCanvas) {
@@ -503,10 +565,15 @@ export function initSetupPage(doc = typeof document !== 'undefined' ? document :
         return;
       }
 
+      loadSeq += 1;
+      const currentSeq = loadSeq;
       const objectUrl = URL.createObjectURL(file);
       const img = new Image();
       img.onload = () => {
         try {
+          if (currentSeq !== loadSeq) {
+            return;
+          }
           const scale = Math.min(1, MAX_DECODER_DIMENSION / Math.max(img.width, img.height));
           const width = Math.max(1, Math.round(img.width * scale));
           const height = Math.max(1, Math.round(img.height * scale));
@@ -531,6 +598,9 @@ export function initSetupPage(doc = typeof document !== 'undefined' ? document :
       };
       img.onerror = () => {
         URL.revokeObjectURL(objectUrl);
+        if (currentSeq !== loadSeq) {
+          return;
+        }
         if (decodeStatus) {
           decodeStatus.textContent = 'Could not read image file. Upload a PNG, JPEG, or WebP screenshot.';
         }

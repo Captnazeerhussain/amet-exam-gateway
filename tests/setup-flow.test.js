@@ -74,6 +74,10 @@ test('APPS_SCRIPT_TEMPLATE matches apps-script/Code.gs verbatim and includes ale
   const codeGs = fs.readFileSync(new URL('../apps-script/Code.gs', import.meta.url), 'utf8');
   assert.match(codeGs, /function doPost\(e\)/);
   assert.match(codeGs, /function authorizeEmailAlerts\(\)/);
+  assert.match(codeGs, /function sanitizeSheetText_\(/);
+  assert.match(codeGs, /function toSafeInt_\(/);
+  assert.match(codeGs, /INVALID_JSON/);
+  assert.match(codeGs, /SessionID/);
   assert.match(codeGs, /LockService\.getScriptLock\(\)/);
   assert.match(codeGs, /Proctor_Events/);
   assert.match(codeGs, /Proctor_Summary/);
@@ -81,6 +85,12 @@ test('APPS_SCRIPT_TEMPLATE matches apps-script/Code.gs verbatim and includes ale
   assert.match(codeGs, /Session\.getEffectiveUser\(\)\.getEmail\(\)/);
   assert.match(codeGs, /CacheService\.getScriptCache\(\)/);
   assert.match(codeGs, /LOCKOUT/);
+  assert.match(codeGs, /\.slice\(0,\s*200\)/);
+
+  const releaseIdx = codeGs.indexOf('lock.releaseLock()');
+  const notifyCallIdx = codeGs.indexOf('notifyExaminer_({');
+  assert.ok(releaseIdx !== -1 && notifyCallIdx !== -1 && releaseIdx < notifyCallIdx, 'lock.releaseLock() must run before notifyExaminer_()');
+
   assert.equal(APPS_SCRIPT_TEMPLATE.trim(), codeGs.trim());
 });
 
@@ -189,4 +199,108 @@ test('initSetupPage wires key generators, form submit, and error handling on a D
   assert.equal(elements['result-panel'].hidden, true);
   assert.equal(elements['setup-error'].hidden, false);
   assert.match(elements['setup-error'].textContent, /title/i);
+});
+
+test('copyWithFeedback shows Copy manually when clipboard API is unavailable and decoder ignores stale onload', async () => {
+  function makeElement(initial = {}) {
+    const listeners = new Map();
+    return {
+      value: '',
+      textContent: '',
+      hidden: false,
+      files: [],
+      width: 0,
+      height: 0,
+      getContext: () => ({
+        drawImage() {},
+        getImageData: (_x, _y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }),
+        putImageData() {},
+      }),
+      ...initial,
+      addEventListener(type, fn) {
+        listeners.set(type, fn);
+      },
+      async dispatch(type, event = { preventDefault() {} }) {
+        const fn = listeners.get(type);
+        if (fn) {
+          return fn(event);
+        }
+        return undefined;
+      },
+    };
+  }
+
+  const elements = {
+    'setup-form': makeElement(),
+    'copy-script-btn': makeElement({ textContent: 'Copy Apps Script' }),
+    'decode-image-input': makeElement(),
+    'decode-gain': makeElement({ value: '24' }),
+    'decode-gain-value': makeElement(),
+    'decode-canvas': makeElement({ hidden: true }),
+    'decode-status': makeElement(),
+  };
+
+  const mockDoc = {
+    location: { href: 'https://example.github.io/exam-proctor/setup.html' },
+    getElementById: (id) => elements[id] || null,
+  };
+
+  const originalNavigatorDesc = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const originalUrlCreate = globalThis.URL.createObjectURL;
+  const originalUrlRevoke = globalThis.URL.revokeObjectURL;
+  const originalImage = globalThis.Image;
+  const originalImageData = globalThis.ImageData;
+
+  const createdImages = [];
+  let urlSeq = 0;
+
+  try {
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: {},
+    });
+    globalThis.URL.createObjectURL = () => `blob:mock-${++urlSeq}`;
+    globalThis.URL.revokeObjectURL = () => {};
+    globalThis.ImageData = class MockImageData {
+      constructor(data, width, height) {
+        this.data = data;
+        this.width = width;
+        this.height = height;
+      }
+    };
+    globalThis.Image = class MockImage {
+      constructor() {
+        this.width = createdImages.length === 0 ? 100 : 200;
+        this.height = createdImages.length === 0 ? 100 : 200;
+        createdImages.push(this);
+      }
+      set src(_val) {}
+    };
+
+    initSetupPage(mockDoc);
+
+    await elements['copy-script-btn'].dispatch('click');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(elements['copy-script-btn'].textContent, 'Copy manually');
+
+    elements['decode-image-input'].files = [{ name: 'first.png' }];
+    await elements['decode-image-input'].dispatch('change');
+    elements['decode-image-input'].files = [{ name: 'second.png' }];
+    await elements['decode-image-input'].dispatch('change');
+
+    // Second image finishes first, then stale first image finishes later
+    createdImages[1].onload();
+    createdImages[0].onload();
+
+    assert.equal(elements['decode-canvas'].width, 200);
+    assert.match(elements['decode-status'].textContent, /200x200/);
+  } finally {
+    if (originalNavigatorDesc) {
+      Object.defineProperty(globalThis, 'navigator', originalNavigatorDesc);
+    }
+    globalThis.URL.createObjectURL = originalUrlCreate;
+    globalThis.URL.revokeObjectURL = originalUrlRevoke;
+    globalThis.Image = originalImage;
+    globalThis.ImageData = originalImageData;
+  }
 });

@@ -58,6 +58,19 @@ function bytesToHex(bytes) {
 }
 
 /**
+ * Convert an even-length hexadecimal string to a byte array.
+ * @param {string} hex
+ * @returns {Uint8Array}
+ */
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) {
+    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+/**
  * Constant-time string comparison for fixed-length hex digests.
  * @param {string} a
  * @param {string} b
@@ -186,7 +199,7 @@ export function normalizeGoogleFormUrl(rawUrl) {
 }
 
 /**
- * Hash a Teacher Unlock PIN using salted SHA-256.
+ * Hash a Teacher Unlock PIN using PBKDF2-HMAC-SHA256 (100,000 iterations, 256 bits).
  * @param {string} pin
  * @param {string} [saltHex]
  * @returns {Promise<{ saltHex: string, hashHex: string }>}
@@ -198,7 +211,12 @@ export async function hashPin(pin, saltHex) {
 
   let resolvedSaltHex;
   if (saltHex !== undefined) {
-    if (typeof saltHex !== 'string' || !/^[0-9a-f]+$/i.test(saltHex)) {
+    if (
+      typeof saltHex !== 'string' ||
+      saltHex.length === 0 ||
+      saltHex.length % 2 !== 0 ||
+      !/^[0-9a-f]+$/i.test(saltHex)
+    ) {
       throw new Error('Invalid hex salt');
     }
     resolvedSaltHex = saltHex.toLowerCase();
@@ -207,16 +225,29 @@ export async function hashPin(pin, saltHex) {
     resolvedSaltHex = bytesToHex(saltBytes);
   }
 
-  const digestBuffer = await globalThis.crypto.subtle.digest(
-    'SHA-256',
-    encoder.encode(`${resolvedSaltHex}:${pin.trim()}`)
+  const keyMaterial = await globalThis.crypto.subtle.importKey(
+    'raw',
+    encoder.encode(pin.trim()),
+    'PBKDF2',
+    false,
+    ['deriveBits']
   );
-  const hashHex = bytesToHex(new Uint8Array(digestBuffer));
+  const derivedBits = await globalThis.crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: hexToBytes(resolvedSaltHex),
+      iterations: PBKDF2_ITERATIONS,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    256
+  );
+  const hashHex = bytesToHex(new Uint8Array(derivedBits));
   return { saltHex: resolvedSaltHex, hashHex };
 }
 
 /**
- * Verify a candidate PIN against a salted SHA-256 digest.
+ * Verify a candidate PIN against a PBKDF2-HMAC-SHA256 digest.
  * @param {string} pin
  * @param {string} saltHex
  * @param {string} expectedHashHex
@@ -227,6 +258,8 @@ export async function verifyPin(pin, saltHex, expectedHashHex) {
     typeof pin !== 'string' ||
     pin.trim().length === 0 ||
     typeof saltHex !== 'string' ||
+    saltHex.length === 0 ||
+    saltHex.length % 2 !== 0 ||
     !/^[0-9a-f]+$/i.test(saltHex) ||
     typeof expectedHashHex !== 'string' ||
     !/^[0-9a-f]{64}$/i.test(expectedHashHex)
@@ -279,6 +312,19 @@ export async function createExamEnvelope(config) {
   }
 
   const normalizedFormUrl = normalizeGoogleFormUrl(config.formUrl);
+  const trimmedWebhookUrl = (config.webhookUrl || '').trim();
+  if (trimmedWebhookUrl.length > 0) {
+    let parsedWebhook;
+    try {
+      parsedWebhook = new URL(trimmedWebhookUrl);
+    } catch {
+      throw new Error('Webhook URL must use https://');
+    }
+    if (parsedWebhook.protocol !== 'https:') {
+      throw new Error('Webhook URL must use https://');
+    }
+  }
+
   const examPin = config.examPin.trim();
   const unlockPin = config.unlockPin.trim();
 
@@ -289,7 +335,7 @@ export async function createExamEnvelope(config) {
   const secretPayload = JSON.stringify({
     title: config.title.trim(),
     formUrl: normalizedFormUrl,
-    webhookUrl: (config.webhookUrl || '').trim(),
+    webhookUrl: trimmedWebhookUrl,
   });
 
   const cipherBuffer = await globalThis.crypto.subtle.encrypt(
@@ -388,9 +434,11 @@ export async function decryptExamEnvelope(token, examPin) {
       throw new Error('Malformed decrypted payload');
     }
 
+    const validatedFormUrl = normalizeGoogleFormUrl(secret.formUrl);
+
     return {
       title: secret.title,
-      formUrl: secret.formUrl,
+      formUrl: validatedFormUrl,
       webhookUrl: secret.webhookUrl,
       maxStrikes: envelope.maxStrikes,
       lockMode: envelope.lockMode,

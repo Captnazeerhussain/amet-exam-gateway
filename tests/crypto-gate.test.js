@@ -51,10 +51,19 @@ test('normalizeGoogleFormUrl rejects forms.gle, non-Google domains, and non-HTTP
   );
 });
 
-test('hashPin and verifyPin perform salted SHA-256 round-trip and reject wrong PIN', async () => {
+test('hashPin and verifyPin use PBKDF2-HMAC-SHA256 (not single-pass SHA-256) and reject wrong PIN', async () => {
   const { saltHex, hashHex } = await hashPin('842910');
   assert.match(saltHex, /^[0-9a-f]{32}$/);
   assert.match(hashHex, /^[0-9a-f]{64}$/);
+
+  const singlePassDigest = await globalThis.crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(`${saltHex}:842910`)
+  );
+  const singlePassHex = Array.from(new Uint8Array(singlePassDigest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  assert.notEqual(hashHex, singlePassHex, 'hashPin must not use single-pass SHA-256');
 
   assert.equal(await verifyPin('842910', saltHex, hashHex), true);
   assert.equal(await verifyPin('000000', saltHex, hashHex), false);
@@ -158,4 +167,66 @@ test('createExamEnvelope validates required fields and policies', async () => {
   await assert.rejects(() => createExamEnvelope({ ...base, maxStrikes: 0 }));
   await assert.rejects(() => createExamEnvelope({ ...base, lockMode: 'soft-lock' }));
   await assert.rejects(() => createExamEnvelope({ ...base, devicePolicy: 'tablets-only' }));
+  await assert.rejects(
+    () => createExamEnvelope({ ...base, webhookUrl: 'http://script.google.com/macros/s/abc/exec' }),
+    /Webhook URL must use https:\/\//
+  );
+  await assert.rejects(
+    () => createExamEnvelope({ ...base, webhookUrl: 'not-a-valid-url' }),
+    /Webhook URL must use https:\/\//
+  );
+});
+
+test('decryptExamEnvelope re-validates decrypted formUrl via normalizeGoogleFormUrl', async () => {
+  const encoder = new TextEncoder();
+  const saltBytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  const ivBytes = globalThis.crypto.getRandomValues(new Uint8Array(12));
+  const keyMaterial = await globalThis.crypto.subtle.importKey(
+    'raw',
+    encoder.encode('1234'),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+  const key = await globalThis.crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: saltBytes, iterations: 100_000, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt']
+  );
+  const maliciousCipher = await globalThis.crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: ivBytes },
+    key,
+    encoder.encode(
+      JSON.stringify({
+        title: 'Tampered Form URL',
+        formUrl: 'javascript:alert(1)',
+        webhookUrl: '',
+      })
+    )
+  );
+  const toB64Url = (bytes) => {
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  };
+  const { saltHex: unlockSalt, hashHex: unlockHash } = await hashPin('5678');
+  const envelope = {
+    v: 1,
+    salt: toB64Url(saltBytes),
+    iv: toB64Url(ivBytes),
+    maxStrikes: 2,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+    unlockSalt,
+    unlockHash,
+    ct: toB64Url(new Uint8Array(maliciousCipher)),
+  };
+  const forgedToken = toB64Url(encoder.encode(JSON.stringify(envelope)));
+
+  await assert.rejects(
+    () => decryptExamEnvelope(forgedToken, '1234'),
+    (err) => err instanceof Error && err.message === 'INVALID_EXAM_PIN'
+  );
 });
