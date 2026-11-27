@@ -81,6 +81,16 @@ export function analyzeVideoFrame(rgbaPixels) {
 }
 
 /**
+ * Classify an already-computed RMS level (e.g. averaged over several analyser windows).
+ * @param {number} rms
+ * @returns {{ rms: number, isSpeechSpike: boolean }}
+ */
+export function classifyAudioRms(rms) {
+  const level = Number.isFinite(rms) && rms > 0 ? rms : 0;
+  return { rms: level, isSpeechSpike: level >= SPEECH_SPIKE_RMS_THRESHOLD };
+}
+
+/**
  * Compute normalized time-domain audio RMS and flag speech spikes.
  * @param {Float32Array | number[] | null | undefined} timeDomainSamples
  * @returns {{ rms: number, isSpeechSpike: boolean }}

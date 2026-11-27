@@ -1,5 +1,6 @@
 import { createExamEnvelope, normalizeGoogleFormUrl } from '../core/crypto-gate.js';
 import { amplifyStealthWatermark } from '../core/watermark.js';
+import { parseRosterText, buildRosterDigest } from '../core/roster.js';
 
 const KEY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const MAX_DECODER_DIMENSION = 1600;
@@ -55,8 +56,28 @@ function ensureSheet_(ss, name, headers) {
   return sheet;
 }
 
+const STRIKE_ALERT_THROTTLE_SEC_ = 60;
+const LOCKOUT_ALERT_THROTTLE_SEC_ = 600;
+const MAX_ALERT_EMAILS_PER_HOUR_ = 60;
+
 /**
- * Send a throttled examiner email alert for STRIKE or immediate alert for LOCKOUT.
+ * Enforce a global hourly e-mail budget so forged webhook traffic cannot exhaust
+ * the MailApp daily quota and hide genuine alerts.
+ * @param {GoogleAppsScript.Cache.Cache} cache
+ * @return {boolean} true when another e-mail may be sent this hour.
+ */
+function takeAlertBudget_(cache) {
+  const hourKey = 'alert_budget_' + new Date().toISOString().slice(0, 13);
+  const used = toSafeInt_(cache.get(hourKey));
+  if (used >= MAX_ALERT_EMAILS_PER_HOUR_) {
+    return false;
+  }
+  cache.put(hourKey, String(used + 1), 3700);
+  return true;
+}
+
+/**
+ * Send a throttled examiner email alert for STRIKE (1/min/session) or LOCKOUT (1/10min/session).
  * @param {Object} payload
  */
 function notifyExaminer_(payload) {
@@ -76,12 +97,17 @@ function notifyExaminer_(payload) {
   const cache = CacheService.getScriptCache();
   const cacheKey = ('alert_' + eventType + '_' + sessionId + '_' + rollId).slice(0, 200);
 
-  if (eventType !== 'LOCKOUT' && cache.get(cacheKey)) {
+  if (cache.get(cacheKey)) {
     return;
   }
-
-  if (eventType !== 'LOCKOUT') {
-    cache.put(cacheKey, '1', 60);
+  cache.put(
+    cacheKey,
+    '1',
+    eventType === 'LOCKOUT' ? LOCKOUT_ALERT_THROTTLE_SEC_ : STRIKE_ALERT_THROTTLE_SEC_
+  );
+  if (!takeAlertBudget_(cache)) {
+    Logger.log('Hourly alert e-mail budget exhausted; alert logged to sheet only.');
+    return;
   }
 
   const subject = '[MALPRACTICE ALERT] ' + studentName + ' (' + rollId + ') - ' + eventType;
@@ -133,7 +159,41 @@ function notifyExaminer_(payload) {
 }
 
 /**
- * Single-use key/session claim check via GET ?action=claim&rollId=...&examTitle=...
+ * Return true when a roll number already has a claim or summary row for this exam.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+ * @param {string} rollId
+ * @param {string} examTitle
+ * @return {boolean}
+ */
+function isRollAlreadyClaimed_(ss, rollId, examTitle) {
+  const checks = [
+    { name: 'Proctor_Claims', rollCol: 1, titleCol: 2, width: 5 },
+    { name: 'Proctor_Summary', rollCol: 0, titleCol: 2, width: 11 },
+  ];
+  for (let c = 0; c < checks.length; c += 1) {
+    const sheet = ss.getSheetByName(checks[c].name);
+    if (!sheet || sheet.getLastRow() < 2) {
+      continue;
+    }
+    const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, checks[c].width).getValues();
+    for (let i = 0; i < rows.length; i += 1) {
+      if (
+        sanitizeSheetText_(String(rows[i][checks[c].rollCol] || '').trim()) === rollId &&
+        sanitizeSheetText_(String(rows[i][checks[c].titleCol] || '').trim()) === examTitle
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Atomic single-use claim via GET ?action=claim&rollId=...&examTitle=...&sessionId=...[&resume=1]
+ * The claim is recorded in Proctor_Claims under the script lock, so two devices racing
+ * with the same roll number cannot both be admitted. resume=1 is sent only after the
+ * invigilator entered the Teacher Unlock Key on the student device; it is logged as RESUME.
+ * To free a roll number manually, delete its rows from Proctor_Claims and Proctor_Summary.
  * @param {GoogleAppsScript.Events.DoGet} e
  */
 function doGet(e) {
@@ -146,6 +206,8 @@ function doGet(e) {
 
   const rollId = sanitizeSheetText_(String(params.rollId || '').trim());
   const examTitle = sanitizeSheetText_(String(params.examTitle || '').trim());
+  const sessionId = sanitizeSheetText_(String(params.sessionId || '').trim());
+  const isResume = params.resume === '1';
   if (!rollId || !examTitle) {
     return ContentService.createTextOutput(
       JSON.stringify({ ok: false, allowed: false, reason: 'MISSING_PARAMS' })
@@ -156,20 +218,26 @@ function doGet(e) {
   lock.waitLock(10000);
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const summarySheet = ss.getSheetByName('Proctor_Summary');
-    if (summarySheet && summarySheet.getLastRow() >= 2) {
-      const rows = summarySheet.getRange(2, 1, summarySheet.getLastRow() - 1, 11).getValues();
-      for (let i = 0; i < rows.length; i += 1) {
-        if (
-          sanitizeSheetText_(String(rows[i][0] || '').trim()) === rollId &&
-          sanitizeSheetText_(String(rows[i][2] || '').trim()) === examTitle
-        ) {
-          return ContentService.createTextOutput(
-            JSON.stringify({ ok: false, allowed: false, reason: 'KEY_ALREADY_USED' })
-          ).setMimeType(ContentService.MimeType.JSON);
-        }
-      }
+    if (!isResume && isRollAlreadyClaimed_(ss, rollId, examTitle)) {
+      return ContentService.createTextOutput(
+        JSON.stringify({ ok: false, allowed: false, reason: 'KEY_ALREADY_USED' })
+      ).setMimeType(ContentService.MimeType.JSON);
     }
+    const claimsSheet = ensureSheet_(ss, 'Proctor_Claims', [
+      'ClaimedAt',
+      'RollID',
+      'ExamTitle',
+      'SessionID',
+      'ClaimType',
+    ]);
+    claimsSheet.appendRow([
+      new Date().toISOString(),
+      rollId,
+      examTitle,
+      sessionId,
+      isResume ? 'RESUME' : 'CLAIM',
+    ]);
+    SpreadsheetApp.flush();
     return ContentService.createTextOutput(
       JSON.stringify({ ok: true, allowed: true })
     ).setMimeType(ContentService.MimeType.JSON);
@@ -383,12 +451,17 @@ export function generateAccessKey(prefix = 'EXM') {
       ? prefix.trim().toUpperCase().replace(/[^A-Z0-9]/g, '') || 'EXM'
       : 'EXM';
 
-  const randomBytes = globalThis.crypto.getRandomValues(new Uint8Array(8));
   let chars = '';
-  for (let i = 0; i < randomBytes.length; i += 1) {
-    // KEY_ALPHABET has 32 chars so (byte & 31) has zero modulo bias.
-    chars += KEY_ALPHABET[randomBytes[i] & 31];
-  }
+  // Re-draw until the random part mixes letters and digits, so generated keys always
+  // satisfy the Teacher Unlock Key strength rule (an all-letter draw happens ~10% of the time).
+  do {
+    const randomBytes = globalThis.crypto.getRandomValues(new Uint8Array(8));
+    chars = '';
+    for (let i = 0; i < randomBytes.length; i += 1) {
+      // KEY_ALPHABET has 32 chars so (byte & 31) has zero modulo bias.
+      chars += KEY_ALPHABET[randomBytes[i] & 31];
+    }
+  } while (!/[0-9]/.test(chars) || !/[A-Z]/.test(chars));
 
   return `${cleanPrefix}-${chars.slice(0, 4)}-${chars.slice(4, 8)}`;
 }
@@ -404,9 +477,10 @@ export function generateAccessKey(prefix = 'EXM') {
  *   unlockPin: string,
  *   maxStrikes: number,
  *   lockMode: 'hard-lock' | 'warn-only',
- *   devicePolicy: 'all-devices' | 'phones-only'
+ *   devicePolicy: 'all-devices' | 'phones-only',
+ *   rosterText?: string
  * }} config
- * @returns {Promise<{ examUrl: string, token: string }>}
+ * @returns {Promise<{ examUrl: string, token: string, rosterCount: number }>}
  */
 export async function buildStudentExamUrl(setupPageUrl, config) {
   if (!config || typeof config !== 'object') {
@@ -417,14 +491,22 @@ export async function buildStudentExamUrl(setupPageUrl, config) {
   }
 
   const normalizedFormUrl = normalizeGoogleFormUrl(config.formUrl);
+  const { entries, errors } = parseRosterText(config.rosterText || '');
+  if (errors.length > 0) {
+    const more = errors.length > 3 ? ` (+${errors.length - 3} more)` : '';
+    throw new Error(`Class list problem — ${errors.slice(0, 3).join('; ')}${more}`);
+  }
+  const roster = await buildRosterDigest(entries);
+  const { rosterText, ...envelopeConfig } = config;
   const token = await createExamEnvelope({
-    ...config,
+    ...envelopeConfig,
     title: config.title.trim(),
     formUrl: normalizedFormUrl,
+    roster,
   });
 
   const examUrl = new URL(`./?exam=${token}`, setupPageUrl).toString();
-  return { examUrl, token };
+  return { examUrl, token, rosterCount: entries.length };
 }
 
 /**
@@ -480,6 +562,9 @@ export function initSetupPage(doc = typeof document !== 'undefined' ? document :
   const lockModeSelect = doc.getElementById('lock-mode');
   const devicePolicySelect = doc.getElementById('device-policy');
   const webhookInput = doc.getElementById('webhook-url');
+  const rosterInput = doc.getElementById('roster-input');
+  const rosterStatus = doc.getElementById('roster-status');
+  const rosterSummary = doc.getElementById('roster-summary');
 
   const errorBanner = doc.getElementById('setup-error');
   const resultPanel = doc.getElementById('result-panel');
@@ -529,6 +614,24 @@ export function initSetupPage(doc = typeof document !== 'undefined' ? document :
     });
   }
 
+  function refreshRosterStatus() {
+    if (!rosterInput || !rosterStatus) {
+      return;
+    }
+    const { entries, errors } = parseRosterText(rosterInput.value || '');
+    if (errors.length > 0) {
+      rosterStatus.textContent = `${entries.length} students read • ${errors.length} problem(s): ${errors[0]}`;
+    } else if (entries.length > 0) {
+      rosterStatus.textContent = `${entries.length} students on the class list — only these name + roll number pairs can start the exam.`;
+    } else {
+      rosterStatus.textContent = 'Optional. Leave empty to let any name and roll number start the exam.';
+    }
+  }
+  if (rosterInput) {
+    rosterInput.addEventListener('input', refreshRosterStatus);
+    refreshRosterStatus();
+  }
+
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (errorBanner) {
@@ -539,7 +642,7 @@ export function initSetupPage(doc = typeof document !== 'undefined' ? document :
     try {
       const maxStrikesRaw = Number.parseInt(maxStrikesInput?.value || '3', 10);
       const baseUrl = doc.location?.href || globalThis.location?.href || 'https://localhost/setup.html';
-      const { examUrl } = await buildStudentExamUrl(baseUrl, {
+      const { examUrl, rosterCount } = await buildStudentExamUrl(baseUrl, {
         title: titleInput?.value || '',
         formUrl: formUrlInput?.value || '',
         webhookUrl: webhookInput?.value || '',
@@ -548,7 +651,14 @@ export function initSetupPage(doc = typeof document !== 'undefined' ? document :
         maxStrikes: maxStrikesRaw,
         lockMode: lockModeSelect?.value || 'hard-lock',
         devicePolicy: devicePolicySelect?.value || 'all-devices',
+        rosterText: rosterInput?.value || '',
       });
+      if (rosterSummary) {
+        rosterSummary.textContent =
+          rosterCount > 0
+            ? `Student login ON: ${rosterCount} students on the class list.`
+            : 'Student login OFF: any name and roll number can start.';
+      }
 
       if (studentLinkOutput) {
         if ('value' in studentLinkOutput) {

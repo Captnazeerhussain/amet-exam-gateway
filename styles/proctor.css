@@ -240,6 +240,8 @@ pre {
 .field-group input[type="text"],
 .field-group input[type="url"],
 .field-group input[type="number"],
+.field-group input[type="password"],
+.field-group textarea,
 .field-group select {
   width: 100%;
   padding: 0.65rem 0.8rem;
@@ -251,7 +253,16 @@ pre {
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
+.field-group textarea {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.86rem;
+  line-height: 1.45;
+  resize: vertical;
+  min-height: 7.5rem;
+}
+
 .field-group input:focus,
+.field-group textarea:focus,
 .field-group select:focus {
   outline: none;
   border-color: var(--navy);

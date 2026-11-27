@@ -104,7 +104,7 @@
                 Generate Key
               </button>
             </div>
-            <span class="field-hint">Only the invigilator uses this key to unlock a locked-out candidate terminal.</span>
+            <span class="field-hint">Only the invigilator uses this key to unlock a locked-out terminal or re-admit a candidate after a crash/reload. Minimum 8 characters mixing letters and numbers — use Generate Key.</span>
           </div>
 
           <div class="field-group">
@@ -134,6 +134,19 @@
               <option value="all-devices" selected>Phones + Laptops (All Devices)</option>
               <option value="phones-only">Phones Only — Blocks All Desktop Browsers &amp; Extensions</option>
             </select>
+          </div>
+
+          <div class="field-group field-span-2">
+            <label for="roster-input">Class List — Student Login (Optional)</label>
+            <textarea
+              id="roster-input"
+              name="roster"
+              rows="6"
+              spellcheck="false"
+              placeholder="261NS1A1401, Riya Patel&#10;261NS1A1402, Arjun Kumar&#10;(paste two columns from Excel / Google Sheets: Roll Number and Name)"
+            ></textarea>
+            <span id="roster-status" class="field-hint">Optional. Leave empty to let any name and roll number start the exam.</span>
+            <span class="field-hint">One student per line. Names are stored only as salted hashes inside the encrypted link. Spaces, dots and capital letters are ignored when matching.</span>
           </div>
 
           <div class="field-group field-span-2">
@@ -179,6 +192,7 @@
       <div id="result-panel" class="result-panel" hidden>
         <h3>Encrypted Examination Link Ready</h3>
         <p class="field-hint">Distribute this URL to candidates before the exam. Keep the Exam Access Key private until start time.</p>
+        <p id="roster-summary" class="field-hint"></p>
         <div class="result-row">
           <input id="student-link-output" type="text" readonly aria-label="Encrypted Student Exam URL" />
           <button type="button" id="copy-link-btn" class="btn btn-secondary">Copy Student Link</button>

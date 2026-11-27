@@ -7,6 +7,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
 const BANNER_PATH = path.join(REPO_ROOT, 'assets', 'amet-banner.jpg');
 
+const MAX_EVENTS = 5000;
+const MAX_ALERTS = 200;
+
+function pushCapped(list, item, max) {
+  list.push(item);
+  if (list.length > max) {
+    list.splice(0, list.length - max);
+  }
+}
+
 function toSafeInt(val) {
   const n = Number(val);
   return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
@@ -246,6 +256,7 @@ export function createProctorBackendServer() {
   const events = [];
   const summaryMap = new Map();
   const alerts = [];
+  const claims = [];
 
   function ingestEvent(raw) {
     const timestamp = cleanStr(raw.timestamp, new Date().toISOString());
@@ -276,7 +287,7 @@ export function createProctorBackendServer() {
       cameraOk,
       micSpikes,
     };
-    events.push(eventRecord);
+    pushCapped(events, eventRecord, MAX_EVENTS);
 
     const key = `${sessionId}::${examTitle}`;
     const existing = summaryMap.get(key) || {
@@ -295,14 +306,15 @@ export function createProctorBackendServer() {
 
     existing.lastHeartbeatAt = timestamp;
     if (eventType === 'HEARTBEAT') existing.heartbeats += 1;
-    existing.strikes = eventType === 'UNLOCK' ? strikes : Math.max(existing.strikes, strikes);
+    // Match Apps Script: the summary keeps the highest strike count reached.
+    existing.strikes = Math.max(existing.strikes, strikes);
     if (locked) existing.lockedOut = 'YES';
     if (eventType === 'UNLOCK') existing.lockedOut = 'UNLOCKED';
     if (reason) existing.latestReason = reason;
     summaryMap.set(key, existing);
 
     if (eventType === 'STRIKE' || eventType === 'LOCKOUT') {
-      alerts.push({
+      pushCapped(alerts, {
         timestamp,
         rollId,
         studentName,
@@ -310,13 +322,16 @@ export function createProctorBackendServer() {
         subject: `[MALPRACTICE ALERT] ${studentName} (${rollId}) - ${eventType}`,
         body: `Reason: ${reason || eventType} • Strikes: ${strikes} • Device: ${deviceType} • Time: ${timestamp.slice(11, 19)} UTC`,
         snapshotBase64,
-      });
+      }, MAX_ALERTS);
     }
 
     return eventRecord;
   }
 
   const server = http.createServer((req, res) => {
+    // Only the student-facing webhook is cross-origin. The dashboard and /api/state are
+    // same-origin, so no CORS header there: other sites the examiner visits must not be
+    // able to read candidate names and webcam snapshots from localhost.
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -343,13 +358,13 @@ export function createProctorBackendServer() {
     }
 
     if (req.method === 'GET' && (urlPath === '/' || urlPath === '/dashboard')) {
-      res.writeHead(200, { ...corsHeaders, 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(DASHBOARD_HTML);
       return;
     }
 
     if (req.method === 'GET' && urlPath === '/api/state') {
-      res.writeHead(200, { ...corsHeaders, 'Content-Type': 'application/json; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(
         JSON.stringify({
           ok: true,
@@ -366,9 +381,25 @@ export function createProctorBackendServer() {
       if (fullUrl.searchParams.get('action') === 'claim') {
         const qRoll = cleanStr(fullUrl.searchParams.get('rollId'), '');
         const qTitle = cleanStr(fullUrl.searchParams.get('examTitle'), '');
-        const alreadyExists = Array.from(summaryMap.values()).some(
-          (row) => row.rollId === qRoll && row.examTitle === qTitle
-        );
+        const qSession = cleanStr(fullUrl.searchParams.get('sessionId'), '');
+        const isResume = fullUrl.searchParams.get('resume') === '1';
+        const alreadyExists =
+          !isResume &&
+          (claims.some((c) => c.rollId === qRoll && c.examTitle === qTitle) ||
+            Array.from(summaryMap.values()).some(
+              (row) => row.rollId === qRoll && row.examTitle === qTitle
+            ));
+        if (!alreadyExists && qRoll && qTitle) {
+          // Record the claim immediately (atomic in single-threaded Node) to close the race
+          // where two devices pass the check before either START event arrives.
+          claims.push({
+            claimedAt: new Date().toISOString(),
+            rollId: qRoll,
+            examTitle: qTitle,
+            sessionId: qSession,
+            claimType: isResume ? 'RESUME' : 'CLAIM',
+          });
+        }
         res.writeHead(200, { ...corsHeaders, 'Content-Type': 'application/json; charset=utf-8' });
         res.end(
           JSON.stringify(
@@ -407,7 +438,11 @@ export function createProctorBackendServer() {
     res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND' }));
   });
 
-  return { server, ingestEvent, getState: () => ({ summary: Array.from(summaryMap.values()), events, alerts }) };
+  return {
+    server,
+    ingestEvent,
+    getState: () => ({ summary: Array.from(summaryMap.values()), events, alerts, claims }),
+  };
 }
 
 const isDirectRun =

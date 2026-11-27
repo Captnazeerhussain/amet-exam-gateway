@@ -10,6 +10,14 @@ import {
 } from '../src/ui/setup-app.js';
 import { decryptExamEnvelope } from '../src/core/crypto-gate.js';
 
+test('generateAccessKey always mixes letters and digits so generated unlock keys pass the strength rule', () => {
+  for (let i = 0; i < 500; i += 1) {
+    const key = generateAccessKey('TCH').slice(4);
+    assert.match(key, /[0-9]/);
+    assert.match(key, /[A-Z]/);
+  }
+});
+
 test('generateAccessKey returns prefixed XXXX-XXXX keys using unambiguous alphanumeric alphabet', () => {
   const defaultKey = generateAccessKey();
   assert.match(defaultKey, /^EXM-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/);

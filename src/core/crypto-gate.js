@@ -1,9 +1,12 @@
+import { isValidRosterDigest } from './roster.js';
+
 const PBKDF2_ITERATIONS = 100_000;
 const SALT_BYTE_LENGTH = 16;
 const IV_BYTE_LENGTH = 12;
 const ENVELOPE_VERSION = 1;
 const VALID_LOCK_MODES = new Set(['hard-lock', 'warn-only']);
 const VALID_DEVICE_POLICIES = new Set(['all-devices', 'phones-only']);
+const MIN_UNLOCK_KEY_LENGTH = 8;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -165,6 +168,24 @@ function parseRawEnvelope(token) {
 }
 
 /**
+ * Reject Teacher Unlock Keys that are cheap to brute-force offline. The unlock hash
+ * travels inside every student link, so a short or digits-only key can be recovered
+ * on a laptop in minutes even with 100k PBKDF2 iterations.
+ * @param {string} unlockPin
+ * @returns {string | null} Human-readable problem, or null when the key is acceptable.
+ */
+export function describeWeakUnlockKey(unlockPin) {
+  const key = typeof unlockPin === 'string' ? unlockPin.trim() : '';
+  if (key.length < MIN_UNLOCK_KEY_LENGTH) {
+    return `Teacher Unlock Key must be at least ${MIN_UNLOCK_KEY_LENGTH} characters (use Generate for a strong key)`;
+  }
+  if (!/[A-Za-z]/.test(key) || !/[0-9]/.test(key)) {
+    return 'Teacher Unlock Key must mix letters and numbers (use Generate for a strong key)';
+  }
+  return null;
+}
+
+/**
  * Validate and normalize a Google Form URL for embedded student delivery.
  * @param {string} rawUrl
  * @returns {string}
@@ -298,6 +319,10 @@ export async function createExamEnvelope(config) {
   if (typeof config.unlockPin !== 'string' || config.unlockPin.trim().length === 0) {
     throw new Error('Teacher Unlock PIN must be a non-empty string');
   }
+  const weakUnlockReason = describeWeakUnlockKey(config.unlockPin);
+  if (weakUnlockReason) {
+    throw new Error(weakUnlockReason);
+  }
   if (!Number.isInteger(config.maxStrikes) || config.maxStrikes < 1) {
     throw new Error('maxStrikes must be an integer >= 1');
   }
@@ -309,6 +334,9 @@ export async function createExamEnvelope(config) {
   }
   if (config.webhookUrl !== undefined && typeof config.webhookUrl !== 'string') {
     throw new Error('webhookUrl must be a string');
+  }
+  if (config.roster !== undefined && config.roster !== null && !isValidRosterDigest(config.roster)) {
+    throw new Error('Invalid class list digest');
   }
 
   const normalizedFormUrl = normalizeGoogleFormUrl(config.formUrl);
@@ -339,6 +367,7 @@ export async function createExamEnvelope(config) {
     title: config.title.trim(),
     formUrl: normalizedFormUrl,
     webhookUrl: trimmedWebhookUrl,
+    ...(config.roster ? { roster: config.roster } : {}),
   });
 
   const cipherBuffer = await globalThis.crypto.subtle.encrypt(
@@ -436,6 +465,9 @@ export async function decryptExamEnvelope(token, examPin) {
     ) {
       throw new Error('Malformed decrypted payload');
     }
+    if (secret.roster !== undefined && !isValidRosterDigest(secret.roster)) {
+      throw new Error('Malformed class list');
+    }
 
     const validatedFormUrl = normalizeGoogleFormUrl(secret.formUrl);
 
@@ -443,6 +475,7 @@ export async function decryptExamEnvelope(token, examPin) {
       title: secret.title,
       formUrl: validatedFormUrl,
       webhookUrl: secret.webhookUrl,
+      roster: secret.roster || null,
       maxStrikes: envelope.maxStrikes,
       lockMode: envelope.lockMode,
       devicePolicy: envelope.devicePolicy,

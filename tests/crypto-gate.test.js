@@ -75,7 +75,7 @@ test('createExamEnvelope hides secrets in base64url envelope, exposes metadata, 
     formUrl: 'https://docs.google.com/forms/d/1TestFormId/edit?usp=sf_link',
     webhookUrl: 'https://script.google.com/macros/s/SECRET_WEBHOOK/exec',
     examPin: ' 123456 ',
-    unlockPin: ' 998877 ',
+    unlockPin: ' TCH-998877 ',
     maxStrikes: 3,
     lockMode: 'hard-lock',
     devicePolicy: 'phones-only',
@@ -90,14 +90,14 @@ test('createExamEnvelope hides secrets in base64url envelope, exposes metadata, 
   assert.ok(!rawJson.includes('SECRET_WEBHOOK'), 'webhookUrl must not appear in plaintext envelope');
   assert.ok(!rawJson.includes('Midterm CS101'), 'title must not appear in plaintext envelope');
   assert.ok(!rawJson.includes('123456'), 'examPin must not appear in plaintext envelope');
-  assert.ok(!rawJson.includes('998877'), 'unlockPin must not appear in plaintext envelope');
+  assert.ok(!rawJson.includes('TCH-998877'), 'unlockPin must not appear in plaintext envelope');
 
   const meta = parseEnvelopeMetadata(token);
   assert.equal(meta.v, 1);
   assert.equal(meta.maxStrikes, 3);
   assert.equal(meta.lockMode, 'hard-lock');
   assert.equal(meta.devicePolicy, 'phones-only');
-  assert.equal(await verifyPin('998877', meta.unlockSalt, meta.unlockHash), true);
+  assert.equal(await verifyPin('TCH-998877', meta.unlockSalt, meta.unlockHash), true);
   assert.equal(await verifyPin('111111', meta.unlockSalt, meta.unlockHash), false);
 
   const decrypted = await decryptExamEnvelope(token, '123456');
@@ -105,6 +105,7 @@ test('createExamEnvelope hides secrets in base64url envelope, exposes metadata, 
     title: 'Midterm CS101 — Algorithms',
     formUrl: 'https://docs.google.com/forms/d/1TestFormId/viewform?usp=sf_link&embedded=true',
     webhookUrl: 'https://script.google.com/macros/s/SECRET_WEBHOOK/exec',
+    roster: null,
     maxStrikes: 3,
     lockMode: 'hard-lock',
     devicePolicy: 'phones-only',
@@ -118,7 +119,7 @@ test('decryptExamEnvelope throws INVALID_EXAM_PIN on wrong PIN, tampered ciphert
     title: 'Quiz 1',
     formUrl: 'https://docs.google.com/forms/d/1Quiz/viewform',
     examPin: '4321',
-    unlockPin: '8765',
+    unlockPin: 'TCH-8765',
     maxStrikes: 2,
     lockMode: 'warn-only',
     devicePolicy: 'all-devices',
@@ -156,7 +157,7 @@ test('createExamEnvelope validates required fields and policies', async () => {
     title: 'Validation Test',
     formUrl: 'https://docs.google.com/forms/d/1Quiz/viewform',
     examPin: '1234',
-    unlockPin: '5678',
+    unlockPin: 'TCH-5678',
     maxStrikes: 1,
     lockMode: 'hard-lock',
     devicePolicy: 'all-devices',
@@ -164,6 +165,10 @@ test('createExamEnvelope validates required fields and policies', async () => {
 
   await assert.rejects(() => createExamEnvelope({ ...base, examPin: '   ' }));
   await assert.rejects(() => createExamEnvelope({ ...base, unlockPin: '' }));
+  // Weak unlock keys are brute-forceable offline because the hash ships in the student link.
+  await assert.rejects(() => createExamEnvelope({ ...base, unlockPin: '5678' }), /at least 8/);
+  await assert.rejects(() => createExamEnvelope({ ...base, unlockPin: '12345678' }), /mix letters and numbers/);
+  await assert.rejects(() => createExamEnvelope({ ...base, unlockPin: 'teacherkey' }), /mix letters and numbers/);
   await assert.rejects(() => createExamEnvelope({ ...base, maxStrikes: 0 }));
   await assert.rejects(() => createExamEnvelope({ ...base, lockMode: 'soft-lock' }));
   await assert.rejects(() => createExamEnvelope({ ...base, devicePolicy: 'tablets-only' }));

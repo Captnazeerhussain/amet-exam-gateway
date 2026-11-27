@@ -138,6 +138,19 @@
                   />
                   <span class="field-hint">Enter the exact alphanumeric Examination Access Key announced by your invigilator.</span>
                 </div>
+
+                <div id="resume-field-group" class="field-group field-span-2" hidden>
+                  <label for="resume-pin">Invigilator Resume Key</label>
+                  <input
+                    id="resume-pin"
+                    name="resumePin"
+                    type="password"
+                    placeholder="Entered by your invigilator"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <span class="field-hint">Only needed to re-enter after a crash, reload, or device change. Your invigilator types the Teacher Unlock Key here.</span>
+                </div>
               </div>
 
               <details class="setup-guide">
@@ -190,7 +203,7 @@
       <header class="exam-topbar" role="banner">
         <div class="topbar-left">
           <span class="topbar-code-pill">261NS1A14PD</span>
-          <span class="topbar-gateway-name">AMET University B.Sc. 25 Exam Gateway</span>
+          <span id="exam-title-display" class="topbar-gateway-name">AMET University B.Sc. 25 Exam Gateway</span>
         </div>
         <div class="topbar-center">
           <span id="active-candidate-badge" class="topbar-candidate-badge">Candidate</span>

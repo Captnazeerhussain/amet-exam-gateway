@@ -8,8 +8,10 @@ import {
   validateMediaTracks,
   analyzeVideoFrame,
   analyzeAudioSamples,
+  classifyAudioRms,
 } from '../core/media-monitor.js';
 import { createStrikeEngine } from '../core/strike-engine.js';
+import { isOnRoster } from '../core/roster.js';
 import { createTelemetryClient } from '../core/telemetry-client.js';
 import {
   formatWatermarkText,
@@ -27,6 +29,12 @@ const TOAST_AUTO_HIDE_MS = 6000;
 const POST_UNLOCK_GRACE_MS = 3000;
 const FULLSCREEN_WARNING_GRACE_MS = 10000;
 const CLAIM_TIMEOUT_MS = 3500;
+// Esc / the browser toolbar can steal focus for a moment when fullscreen is exited.
+// Focus loss longer than this while out of fullscreen is a real WINDOW_BLUR strike.
+const BLUR_GRACE_MS = 2000;
+const POST_UNLOCK_MEDIA_GRACE_MS = 5000;
+const AUDIO_FFT_SIZE = 2048;
+const AUDIO_COLLECT_INTERVAL_MS = 200;
 
 const BLOCKED_REASON_MESSAGES = {
   AUTOMATION_DETECTED:
@@ -193,7 +201,9 @@ export function createExamSessionController(deps) {
   let consecutiveBlackFrames = 0;
   let consecutiveSpeechSpikes = 0;
   let unlockGraceUntil = null;
+  let mediaGraceUntil = null;
   let fullscreenLostAtMs = null;
+  let blurStartedAtMs = null;
 
   function ensureStarted() {
     if (!strikeEngine || !telemetryClient) {
@@ -301,6 +311,7 @@ export function createExamSessionController(deps) {
     tracks,
     nowIso = new Date().toISOString(),
     snapshotBase64 = null,
+    resumePin = '',
   }) {
     const cleanName = typeof studentName === 'string' ? studentName.trim() : '';
     const cleanRoll = typeof rollId === 'string' ? rollId.trim() : '';
@@ -309,6 +320,10 @@ export function createExamSessionController(deps) {
     }
 
     const decrypted = await decryptExamEnvelope(token, examPin);
+    // Student login: the typed name + roll number must be on the teacher's class list.
+    if (!(await isOnRoster(decrypted.roster, cleanName, cleanRoll))) {
+      throw new Error('NOT_ON_ROSTER');
+    }
     const mediaCheck = validateMediaTracks(tracks);
     if (!mediaCheck.valid) {
       throw new Error(mediaCheck.reason);
@@ -316,9 +331,25 @@ export function createExamSessionController(deps) {
 
     const sessionLookupKey = `proctor_session_${cleanRoll}_${meta.unlockHash.slice(0, 16)}`;
     const usedKey = `proctor_used_${meta.unlockHash.slice(0, 16)}`;
-    if (safeStorageGet(sessionStore, sessionLookupKey) || safeStorageGet(sessionStore, usedKey)) {
+    const previousSessionId = safeStorageGet(sessionStore, sessionLookupKey);
+    const usedLocally = Boolean(previousSessionId || safeStorageGet(sessionStore, usedKey));
+
+    // Invigilator resume: the Teacher Unlock Key re-admits a candidate after a crash,
+    // reload, or device swap (and lets the next candidate use a shared lab PC).
+    const cleanResumePin = typeof resumePin === 'string' ? resumePin.trim() : '';
+    let resuming = false;
+    if (cleanResumePin) {
+      if (!(await verifyPin(cleanResumePin, decrypted.unlockSalt, decrypted.unlockHash))) {
+        throw new Error('INVALID_RESUME_KEY');
+      }
+      resuming = true;
+    }
+    if (usedLocally && !resuming) {
       throw new Error('KEY_ALREADY_USED');
     }
+
+    // Same browser + same roll: continue the original session so strike history carries over.
+    const sessionId = resuming && previousSessionId ? previousSessionId : generateSessionId();
 
     // Server-side single-use claim check (blocks reopening in Incognito/another browser when webhookUrl is set)
     if (decrypted.webhookUrl && typeof (deps.fetchFn || globalThis.fetch) === 'function') {
@@ -332,13 +363,22 @@ export function createExamSessionController(deps) {
         claimUrl.searchParams.set('action', 'claim');
         claimUrl.searchParams.set('rollId', cleanRoll);
         claimUrl.searchParams.set('examTitle', decrypted.title);
+        claimUrl.searchParams.set('sessionId', sessionId);
+        if (resuming) {
+          claimUrl.searchParams.set('resume', '1');
+        }
         const claimRes = await fetchFn(claimUrl.toString(), {
           method: 'GET',
           signal: controllerAbort?.signal,
         });
         if (claimRes && claimRes.ok && typeof claimRes.json === 'function') {
           const claimData = await claimRes.json();
-          if (claimData && claimData.allowed === false && claimData.reason === 'KEY_ALREADY_USED') {
+          if (
+            !resuming &&
+            claimData &&
+            claimData.allowed === false &&
+            claimData.reason === 'KEY_ALREADY_USED'
+          ) {
             throw new Error('KEY_ALREADY_USED');
           }
         }
@@ -354,7 +394,6 @@ export function createExamSessionController(deps) {
       }
     }
 
-    const sessionId = generateSessionId();
     safeStorageSet(sessionStore, sessionLookupKey, sessionId);
     safeStorageSet(sessionStore, usedKey, cleanRoll);
 
@@ -367,7 +406,9 @@ export function createExamSessionController(deps) {
     consecutiveBlackFrames = 0;
     consecutiveSpeechSpikes = 0;
     unlockGraceUntil = null;
+    mediaGraceUntil = null;
     fullscreenLostAtMs = null;
+    blurStartedAtMs = null;
 
     strikeEngine = createStrikeEngine({
       sessionKey: `proctor_strikes_${sessionId}`,
@@ -391,8 +432,13 @@ export function createExamSessionController(deps) {
       fetchFn: deps.fetchFn,
     });
 
+    if (resuming && strikeEngine.getState().locked) {
+      // The invigilator is physically present and has just entered the unlock key.
+      await strikeEngine.attemptTeacherUnlock(cleanResumePin);
+    }
+
     const initialState = strikeEngine.getState();
-    const startEventType = initialState.history.length > 0 ? 'RESUME' : 'START';
+    const startEventType = resuming ? 'RESUME' : 'START';
     const snapshotField =
       typeof snapshotBase64 === 'string' && snapshotBase64.length > 0 ? { snapshotBase64 } : {};
 
@@ -404,6 +450,7 @@ export function createExamSessionController(deps) {
         locked: initialState.locked,
         cameraOk,
         micSpikes,
+        ...(resuming ? { reason: 'INVIGILATOR_RESUME' } : {}),
         ...snapshotField,
       },
       nowIso
@@ -429,6 +476,7 @@ export function createExamSessionController(deps) {
       deviceType,
       supportsFullscreen,
       sessionId,
+      resumed: resuming,
       watermarkText,
       watermarkTiles,
       aiCanaryText,
@@ -444,13 +492,26 @@ export function createExamSessionController(deps) {
       ...runtimeSnapshot,
     });
 
-    // When fullscreen is exited on a visible tab (even if Esc/toolbar briefly steals focus),
-    // route to the 10s Fullscreen Freeze Warning instead of an immediate WINDOW_BLUR strike.
-    const effectiveViolation =
+    const outOfFullscreenVisible =
       deviceType !== 'ios' &&
       !runtimeSnapshot?.isFullscreen &&
-      runtimeSnapshot?.visibilityState === 'visible' &&
-      integrity.violation === 'WINDOW_BLUR'
+      runtimeSnapshot?.visibilityState === 'visible';
+
+    if (runtimeSnapshot?.hasFocus !== false) {
+      blurStartedAtMs = null;
+    } else if (blurStartedAtMs === null) {
+      blurStartedAtMs = currentMs;
+    }
+
+    // Esc / the toolbar can briefly steal focus when fullscreen is exited, so a short blur
+    // while out of fullscreen routes to the 10s Fullscreen Freeze Warning. A blur that lasts
+    // longer than BLUR_GRACE_MS is the student working in another window: normal WINDOW_BLUR
+    // strikes apply (pressing Esc must not make leaving the exam cheaper).
+    const effectiveViolation =
+      outOfFullscreenVisible &&
+      integrity.violation === 'WINDOW_BLUR' &&
+      blurStartedAtMs !== null &&
+      currentMs - blurStartedAtMs < BLUR_GRACE_MS
         ? 'FULLSCREEN_EXITED'
         : integrity.violation;
 
@@ -531,28 +592,44 @@ export function createExamSessionController(deps) {
       strikeResult = await recordViolationAndNotify(effectiveViolation, currentMs, snapshotBase64);
     }
 
+    // Still out of fullscreen while blurred: keep the form frozen and the countdown running.
+    let freezeForm = false;
+    let fullscreenRemainingSec = 0;
+    if (outOfFullscreenVisible) {
+      if (fullscreenLostAtMs === null) {
+        fullscreenLostAtMs = currentMs;
+      }
+      freezeForm = true;
+      fullscreenRemainingSec = Math.max(
+        1,
+        Math.ceil((FULLSCREEN_WARNING_GRACE_MS - ((currentMs - fullscreenLostAtMs) % FULLSCREEN_WARNING_GRACE_MS)) / 1000)
+      );
+    }
+
     return {
       ok: integrity.ok,
       violation: effectiveViolation,
       counted: strikeResult ? strikeResult.counted : false,
-      freezeForm: false,
-      fullscreenWarning: false,
-      fullscreenRemainingSec: 0,
+      freezeForm,
+      fullscreenWarning: freezeForm && !strikeEngine.getState().locked,
+      fullscreenRemainingSec,
       alertMessage: strikeResult ? strikeResult.alertMessage : null,
       ...strikeEngine.getState(),
     };
   }
 
   async function evaluateMediaSample(
-    { rgbaPixels, audioSamples, tracks } = {},
+    { rgbaPixels, audioSamples, audioRms, tracks } = {},
     nowMs = Date.now(),
     snapshotBase64 = null
   ) {
     ensureStarted();
-    const audio =
-      audioSamples !== undefined && audioSamples !== null
-        ? analyzeAudioSamples(audioSamples)
-        : { rms: 0, isSpeechSpike: false };
+    let audio = { rms: 0, isSpeechSpike: false };
+    if (Number.isFinite(audioRms)) {
+      audio = classifyAudioRms(audioRms);
+    } else if (audioSamples !== undefined && audioSamples !== null) {
+      audio = analyzeAudioSamples(audioSamples);
+    }
 
     if (tracks !== undefined && tracks !== null) {
       const trackRes = validateMediaTracks(tracks);
@@ -560,6 +637,25 @@ export function createExamSessionController(deps) {
         cameraOk =
           trackRes.reason !== 'CAMERA_INACTIVE' && trackRes.reason !== 'VIRTUAL_CAMERA_BLOCKED';
         const micOk = trackRes.reason !== 'MIC_INACTIVE';
+        const inUnlockGrace =
+          mediaGraceUntil !== null &&
+          Number.isFinite(nowMs) &&
+          nowMs < mediaGraceUntil &&
+          trackRes.reason !== 'VIRTUAL_CAMERA_BLOCKED';
+        if (inUnlockGrace) {
+          // Give the page time to re-acquire an ended camera/mic after a teacher unlock.
+          return {
+            cameraOk,
+            micOk,
+            violation: trackRes.reason,
+            rms: audio.rms,
+            isSpeechSpike: audio.isSpeechSpike,
+            counted: false,
+            alertMessage: null,
+            gracePeriod: true,
+            ...strikeEngine.getState(),
+          };
+        }
         const trackStrike = await recordViolationAndNotify(trackRes.reason, nowMs, snapshotBase64);
         return {
           cameraOk,
@@ -653,6 +749,10 @@ export function createExamSessionController(deps) {
       consecutiveBlackFrames = 0;
       consecutiveSpeechSpikes = 0;
       unlockGraceUntil = currentMs + POST_UNLOCK_GRACE_MS;
+      mediaGraceUntil = currentMs + POST_UNLOCK_MEDIA_GRACE_MS;
+      // Start a fresh 10s fullscreen warning window; never reuse the pre-lockout timestamp.
+      fullscreenLostAtMs = null;
+      blurStartedAtMs = null;
       // Enqueue asynchronously so unlock resolves immediately without blocking on webhook latency.
       void safeEnqueue(
         'UNLOCK',
@@ -774,6 +874,9 @@ export function initStudentPage(
   const rollIdInput = doc.getElementById('roll-id');
   const examPinInput = doc.getElementById('exam-pin');
   const confirmEnvCheckbox = doc.getElementById('confirm-environment-checkbox');
+  const resumeFieldGroup = doc.getElementById('resume-field-group');
+  const resumePinInput = doc.getElementById('resume-pin');
+  const examTitleDisplay = doc.getElementById('exam-title-display');
 
   const examStage = doc.getElementById('exam-stage');
   const examIframe = doc.getElementById('exam-iframe');
@@ -870,7 +973,12 @@ export function initStudentPage(
   // Single reused hardware instances for the entire session (prevents mobile Chrome AudioContext crash)
   let sharedAudioContext = null;
   let sharedAnalyser = null;
+  let sharedAudioSource = null;
   let sharedTimeDomainBuffer = null;
+  let audioRmsSum = 0;
+  let audioRmsCount = 0;
+  let wakeLockSentinel = null;
+  let isReacquiringMedia = false;
   let sharedOffscreenCanvas = null;
   let sharedOffscreenCtx = null;
 
@@ -1015,12 +1123,20 @@ export function initStudentPage(
         return;
       }
       if (!sharedAnalyser) {
-        const source = ctx.createMediaStreamSource(stream);
         sharedAnalyser = ctx.createAnalyser();
-        sharedAnalyser.fftSize = 256;
-        source.connect(sharedAnalyser);
+        // ~43ms windows at 48kHz (256 samples was only ~5ms per reading).
+        sharedAnalyser.fftSize = AUDIO_FFT_SIZE;
         sharedTimeDomainBuffer = new Float32Array(sharedAnalyser.fftSize);
       }
+      if (sharedAudioSource) {
+        try {
+          sharedAudioSource.disconnect?.();
+        } catch {
+          // Ignore disconnect failures on replaced streams.
+        }
+      }
+      sharedAudioSource = ctx.createMediaStreamSource(stream);
+      sharedAudioSource.connect(sharedAnalyser);
     } catch {
       sharedAnalyser = null;
     }
@@ -1047,6 +1163,33 @@ export function initStudentPage(
       // Ignore analyser read errors on restricted mobile hardware.
     }
     return null;
+  }
+
+  /**
+   * Fold one analyser window into the running average used for the next media sample,
+   * so speech detection reflects ~2s of audio rather than a single instant.
+   */
+  function collectAudioLevel() {
+    const samples = sampleAudioTimeDomain();
+    if (!samples) {
+      return;
+    }
+    const { rms } = analyzeAudioSamples(samples);
+    if (Number.isFinite(rms)) {
+      audioRmsSum += rms;
+      audioRmsCount += 1;
+    }
+  }
+
+  function takeAveragedAudioRms() {
+    collectAudioLevel();
+    if (audioRmsCount === 0) {
+      return undefined;
+    }
+    const mean = audioRmsSum / audioRmsCount;
+    audioRmsSum = 0;
+    audioRmsCount = 0;
+    return mean;
   }
 
   function sampleVideoRgbaPixels() {
@@ -1118,29 +1261,88 @@ export function initStudentPage(
     }
   }
 
+  /**
+   * Request element fullscreen. Must be called synchronously inside a user gesture;
+   * the returned promise settles (never rejects) once the browser has decided.
+   * @returns {Promise<void>}
+   */
   function requestFullscreenSafe() {
     try {
       if (!envCheck.supportsFullscreen) {
-        return;
+        return Promise.resolve();
       }
       const req = doc.documentElement?.requestFullscreen?.();
-      if (req && typeof req.catch === 'function') {
-        req.catch(() => {});
+      if (req && typeof req.then === 'function') {
+        return req.then(
+          () => {},
+          () => {}
+        );
       }
     } catch {
       // Ignore fullscreen rejections gracefully.
     }
+    return Promise.resolve();
   }
 
   function requestWakeLockSafe() {
     try {
+      if (wakeLockSentinel && wakeLockSentinel.released === false) {
+        return;
+      }
       const req = nav?.wakeLock?.request?.('screen');
-      if (req && typeof req.catch === 'function') {
-        req.catch(() => {});
+      if (req && typeof req.then === 'function') {
+        req.then(
+          (sentinel) => {
+            wakeLockSentinel = sentinel || null;
+          },
+          () => {}
+        );
       }
     } catch {
       // WakeLock is optional; ignore unsupported platforms.
     }
+  }
+
+  /**
+   * Re-open the camera/mic when a track has ended (webcam unplugged, permission revoked,
+   * camera taken by another app). Without this a teacher unlock is undone within seconds.
+   */
+  async function reacquireMedia() {
+    if (isReacquiringMedia || !nav?.mediaDevices?.getUserMedia) {
+      return false;
+    }
+    isReacquiringMedia = true;
+    try {
+      const fresh = await nav.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 320 }, height: { ideal: 240 } },
+        audio: true,
+      });
+      const previous = activeStream;
+      activeStream = fresh;
+      if (hudVideo) {
+        try {
+          hudVideo.srcObject = fresh;
+          hudVideo.play?.().catch?.(() => {});
+        } catch {
+          // Ignore preview attach errors.
+        }
+      }
+      attachAudioAnalyser(fresh);
+      if (previous && previous !== fresh) {
+        stopMediaStream(previous);
+      }
+      return true;
+    } catch {
+      return false;
+    } finally {
+      isReacquiringMedia = false;
+    }
+  }
+
+  function hasEndedTrack(tracks) {
+    return Boolean(
+      tracks && (tracks.videoReadyState === 'ended' || tracks.audioReadyState === 'ended')
+    );
   }
 
   function isCurrentlyFullscreen() {
@@ -1500,20 +1702,29 @@ export function initStudentPage(
       }, 1000);
     }
 
+    scheduleInterval(() => {
+      if (isExamActive) {
+        collectAudioLevel();
+      }
+    }, AUDIO_COLLECT_INTERVAL_MS);
+
     scheduleInterval(async () => {
       if (!isExamActive) {
         return;
       }
       const tracks = activeStream ? extractStreamTracks(activeStream) : undefined;
+      if (hasEndedTrack(tracks)) {
+        void reacquireMedia();
+      }
       const rgbaPixels = sampleVideoRgbaPixels();
-      const audioSamples = sampleAudioTimeDomain();
-      if (!tracks && !rgbaPixels && !audioSamples) {
+      const audioRms = takeAveragedAudioRms();
+      if (!tracks && !rgbaPixels && audioRms === undefined) {
         return;
       }
       const mediaRes = await controller.evaluateMediaSample(
         {
           rgbaPixels,
-          audioSamples,
+          audioRms,
           tracks,
         },
         Date.now(),
@@ -1541,7 +1752,13 @@ export function initStudentPage(
       void controller.sendHeartbeat(new Date().toISOString());
     }, HEARTBEAT_INTERVAL_MS);
 
-    doc.addEventListener?.('visibilitychange', () => void runRuntimeCheck());
+    doc.addEventListener?.('visibilitychange', () => {
+      // Browsers release the screen wake lock whenever the page is hidden; take it back.
+      if (isExamActive && (doc.visibilityState || 'visible') === 'visible') {
+        requestWakeLockSafe();
+      }
+      void runRuntimeCheck();
+    });
     doc.addEventListener?.('fullscreenchange', () => void runRuntimeCheck());
     win?.addEventListener?.('blur', () => void runRuntimeCheck());
     win?.addEventListener?.('resize', () => void runRuntimeCheck());
@@ -1712,12 +1929,16 @@ export function initStudentPage(
         }
         if (envCheck.supportsFullscreen) {
           await requestFullscreenSafe();
+          // fullscreenElement is set during the browser's next frame after the promise settles.
+          if (!isCurrentlyFullscreen()) {
+            await new Promise((resolve) => setTimeout(resolve, 150));
+          }
         }
         hasConfirmedFullscreenGate = true;
         syncPreStartGate();
         if (envCheck.supportsFullscreen && !isCurrentlyFullscreen() && startError) {
           startError.textContent =
-            'Browser blocked automatic Fullscreen. Press F11 (or allow Fullscreen) and click Step 1 again.';
+            'Fullscreen did not start. Allow Fullscreen for this site and click Step 1 again (F11 browser fullscreen is not detected — use the Step 1 button).';
           startError.hidden = false;
         }
       });
@@ -1746,6 +1967,7 @@ export function initStudentPage(
       const studentName = studentNameInput?.value || '';
       const rollId = rollIdInput?.value || '';
       const examPin = examPinInput?.value || '';
+      const resumePin = resumeFieldGroup && !resumeFieldGroup.hidden ? resumePinInput?.value || '' : '';
 
       if (!studentName.trim() || !rollId.trim() || !examPin.trim()) {
         if (startError) {
@@ -1809,14 +2031,21 @@ export function initStudentPage(
           examPin,
           tracks,
           snapshotBase64,
+          resumePin,
         });
 
+        if (resumePinInput) {
+          resumePinInput.value = '';
+        }
         activeStream = stream;
         attachAudioAnalyser(activeStream);
         activeWatermarkTiles = started.watermarkTiles;
         activeAiCanaryText = started.aiCanaryText;
         examStartedAtMs = Date.now();
 
+        if (examTitleDisplay && started.title) {
+          examTitleDisplay.textContent = started.title;
+        }
         if (activeCandidateBadge) {
           activeCandidateBadge.textContent = `${studentName.trim()} • ${rollId.trim()}`;
         }
@@ -1854,7 +2083,15 @@ export function initStudentPage(
           msg = 'Incorrect Exam Access Key. Verify the key announced by your teacher and retry.';
         } else if (code === 'KEY_ALREADY_USED') {
           msg =
-            'This Examination Access Key has already been used for your Roll Number / browser. Re-opening after closing is blocked.';
+            'This Examination Access Key has already been used for your Roll Number / browser. Re-opening is blocked — ask your invigilator to enter the Teacher Unlock Key in "Invigilator Resume Key" below to continue.';
+          if (resumeFieldGroup) {
+            resumeFieldGroup.hidden = false;
+          }
+        } else if (code === 'NOT_ON_ROSTER') {
+          msg =
+            'Your Name and Roll Number do not match the class list for this exam. Type them exactly as registered with your university (spaces and capital letters do not matter). If they are correct, ask your invigilator.';
+        } else if (code === 'INVALID_RESUME_KEY') {
+          msg = 'Invalid Invigilator Resume Key. Ask your invigilator to re-enter the Teacher Unlock Key.';
         } else if (code === 'VIRTUAL_CAMERA_BLOCKED') {
           msg =
             'Virtual camera detected (e.g. OBS / ManyCam / Snap Camera). Switch to your physical webcam and retry.';
@@ -1908,6 +2145,10 @@ export function initStudentPage(
         }
         applyLockoutUI(false);
         updateHudState({ strikes: res.strikes, maxStrikes: meta.maxStrikes, locked: false });
+        requestWakeLockSafe();
+        if (activeStream && hasEndedTrack(extractStreamTracks(activeStream))) {
+          void reacquireMedia();
+        }
       } finally {
         isUnlocking = false;
         if (unlockSubmitBtn) {
