@@ -922,3 +922,318 @@ test('initStudentPage preserves "Cam Blocked" and mic meter level across showMal
   assert.equal(elements.get('camera-status-dot').classList.has('status-dot-bad'), true);
   assert.equal(elements.get('mic-meter-fill').style.width, '20%');
 });
+
+test('unlockExam resolves before slow UNLOCK telemetry and grants 3000ms post-unlock fullscreen grace window', async () => {
+  const { token } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'Unlock Grace Exam',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScGrace/viewform',
+    webhookUrl: 'https://script.google.com/macros/s/AKfyGrace/exec',
+    examPin: 'EXM-GRACE-2026',
+    unlockPin: 'TCH-8899',
+    maxStrikes: 2,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  let unlockFetchSettled = false;
+  let pendingUnlockFetch = null;
+  const controller = createExamSessionController({
+    token,
+    storage: createMemoryStorage(),
+    fetchFn: (_url, init) => {
+      const payload = JSON.parse(init.body);
+      const p = new Promise((resolve) => {
+        setTimeout(() => {
+          if (payload.eventType === 'UNLOCK') {
+            unlockFetchSettled = true;
+          }
+          resolve({ ok: true });
+        }, 100);
+      });
+      if (payload.eventType === 'UNLOCK') {
+        pendingUnlockFetch = p;
+      }
+      return p;
+    },
+  });
+
+  controller.checkEnvironment({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+    webdriver: false,
+  });
+
+  await controller.startExam({
+    studentName: 'Aarav Sen',
+    rollId: 'CS-101',
+    examPin: 'EXM-GRACE-2026',
+    tracks: {
+      videoLabel: 'HD Webcam',
+      videoReadyState: 'live',
+      audioLabel: 'Mic',
+      audioReadyState: 'live',
+    },
+  });
+
+  // Reach 2/2 lockout
+  await controller.evaluateTick(
+    {
+      isFullscreen: false,
+      hasFocus: true,
+      visibilityState: 'visible',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    1000
+  );
+  const lockedTick = await controller.evaluateTick(
+    {
+      isFullscreen: false,
+      hasFocus: true,
+      visibilityState: 'visible',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    5000
+  );
+  assert.equal(lockedTick.strikes, 2);
+  assert.equal(lockedTick.locked, true);
+
+  // Unlock must resolve BEFORE slow 100ms UNLOCK fetch finishes
+  const unlocked = await controller.unlockExam('TCH-8899', 10000);
+  assert.equal(unlocked.unlocked, true);
+  assert.equal(unlocked.locked, false);
+  assert.equal(unlocked.strikes, 1);
+  assert.equal(unlockFetchSettled, false);
+
+  // Within 3000ms post-unlock grace window, !isFullscreen must NOT count a strike or re-lock
+  const graceTick = await controller.evaluateTick(
+    {
+      isFullscreen: false,
+      hasFocus: true,
+      visibilityState: 'visible',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    11000
+  );
+  assert.equal(graceTick.ok, false);
+  assert.equal(graceTick.gracePeriod, true);
+  assert.equal(graceTick.locked, false);
+  assert.equal(graceTick.strikes, 1);
+
+  // After 3000ms grace window expires, !isFullscreen MUST count strike and re-lock
+  const expiredTick = await controller.evaluateTick(
+    {
+      isFullscreen: false,
+      hasFocus: true,
+      visibilityState: 'visible',
+      screenWidth: 1920,
+      screenHeight: 1080,
+      innerWidth: 1920,
+      innerHeight: 1080,
+    },
+    13500
+  );
+  assert.equal(expiredTick.counted, true);
+  assert.equal(expiredTick.locked, true);
+  assert.equal(expiredTick.strikes, 2);
+
+  if (pendingUnlockFetch) {
+    await pendingUnlockFetch;
+  }
+});
+
+test('initStudentPage guards #start-form against rapid double-submit and re-enables on error', async () => {
+  const { examUrl } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'Double Submit Guard Exam',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScGuard/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-GUARD-2026',
+    unlockPin: 'TCH-GUARD-99',
+    maxStrikes: 2,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const elements = new Map();
+  const scheduledCallbacks = [];
+
+  function makeDomEl(id, initial = {}) {
+    const elListeners = new Map();
+    const classes = new Set();
+    const el = {
+      id,
+      hidden: true,
+      disabled: false,
+      value: '',
+      textContent: '',
+      src: '',
+      className: '',
+      children: [],
+      parentNode: { id: 'mock-parent' },
+      style: {},
+      classList: {
+        add: (c) => classes.add(c),
+        remove: (c) => classes.delete(c),
+        toggle: (c, force) => (force ? classes.add(c) : classes.delete(c)),
+        has: (c) => classes.has(c),
+      },
+      getAttribute: () => null,
+      removeAttribute: () => {},
+      setAttribute: () => {},
+      addEventListener: (type, fn) => {
+        if (!elListeners.has(type)) elListeners.set(type, []);
+        elListeners.get(type).push(fn);
+      },
+      dispatch: (type, event = { preventDefault() {} }) =>
+        Promise.all((elListeners.get(type) || []).map((fn) => fn(event))),
+      appendChild: (child) => {
+        child.parentNode = el;
+        el.children.push(child);
+      },
+      set innerHTML(val) {
+        if (val === '') el.children = [];
+      },
+      get innerHTML() {
+        return '';
+      },
+      ...initial,
+    };
+    if (id) elements.set(id, el);
+    return el;
+  }
+
+  for (const id of [
+    'proctor-app',
+    'missing-exam-view',
+    'blocked-view',
+    'blocked-reasons',
+    'start-gate',
+    'policy-summary',
+    'start-error',
+    'start-form',
+    'start-exam-btn',
+    'student-name',
+    'roll-id',
+    'exam-pin',
+    'exam-stage',
+    'exam-iframe',
+    'stealth-watermark-layer',
+    'ai-canary-layer',
+    'moire-shield-layer',
+    'proctor-hud',
+    'hud-video',
+    'camera-status-dot',
+    'camera-status-text',
+    'mic-meter-fill',
+    'strike-pill',
+    'reenter-fullscreen-btn',
+    'malpractice-toast',
+    'lockout-overlay',
+    'lockout-message',
+    'unlock-error',
+    'unlock-form',
+    'unlock-submit-btn',
+    'unlock-pin-input',
+  ]) {
+    makeDomEl(id);
+  }
+
+  elements.get('student-name').value = 'Meera Nair';
+  elements.get('roll-id').value = 'CS-202';
+  elements.get('exam-pin').value = 'EXM-GUARD-2026';
+
+  let fullscreenCallCount = 0;
+  const mockDoc = {
+    location: { href: examUrl },
+    visibilityState: 'visible',
+    hasFocus: () => true,
+    documentElement: {
+      requestFullscreen: () => {
+        fullscreenCallCount += 1;
+        return Promise.resolve();
+      },
+    },
+    body: {},
+    getElementById: (id) => elements.get(id) || null,
+    createElement: (tag) => makeDomEl('', { tagName: tag.toUpperCase() }),
+    addEventListener() {},
+  };
+
+  let getUserMediaCalls = 0;
+  let resolveMedia = null;
+  let rejectMedia = null;
+
+  const mockWin = {
+    location: { href: examUrl },
+    innerWidth: 1920,
+    innerHeight: 1080,
+    screen: { width: 1920, height: 1080, isExtended: false },
+    setInterval: (fn, ms) => {
+      scheduledCallbacks.push({ fn, ms });
+      return scheduledCallbacks.length;
+    },
+    navigator: {
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+      webdriver: false,
+      mediaDevices: {
+        getUserMedia: () => {
+          getUserMediaCalls += 1;
+          return new Promise((resolve, reject) => {
+            resolveMedia = resolve;
+            rejectMedia = reject;
+          });
+        },
+      },
+    },
+    addEventListener() {},
+  };
+
+  initStudentPage(mockDoc, mockWin);
+
+  const startForm = elements.get('start-form');
+  const startBtn = elements.get('start-exam-btn');
+
+  // 1. Rapidly dispatch two submit events before getUserMedia settles -> only 1 getUserMedia call, button disabled
+  const firstAttemptA = startForm.dispatch('submit', { preventDefault() {} });
+  const firstAttemptB = startForm.dispatch('submit', { preventDefault() {} });
+  assert.equal(getUserMediaCalls, 1);
+  assert.equal(startBtn.disabled, true);
+
+  // Reject getUserMedia -> error shown and button re-enabled for retry
+  rejectMedia(new Error('NotAllowedError'));
+  await Promise.all([firstAttemptA, firstAttemptB]);
+  assert.equal(startBtn.disabled, false);
+  assert.equal(elements.get('start-error').hidden, false);
+
+  // 2. Retry with valid media and rapid double-submit -> still only 1 additional getUserMedia call & 1 runtime interval
+  const secondAttemptA = startForm.dispatch('submit', { preventDefault() {} });
+  const secondAttemptB = startForm.dispatch('submit', { preventDefault() {} });
+  assert.equal(getUserMediaCalls, 2);
+  assert.equal(startBtn.disabled, true);
+
+  resolveMedia({
+    getVideoTracks: () => [{ label: 'Integrated Camera', readyState: 'live', muted: false, stop() {} }],
+    getAudioTracks: () => [{ label: 'Built-in Mic', readyState: 'live', muted: false, stop() {} }],
+    getTracks: () => [{ stop() {} }],
+  });
+  await Promise.all([secondAttemptA, secondAttemptB]);
+
+  assert.equal(elements.get('exam-stage').hidden, false);
+  assert.equal(scheduledCallbacks.filter((c) => c.ms === 350).length, 1);
+
+  // Also verify unlockForm triggers requestFullscreen synchronously on submit
+  const beforeUnlockFs = fullscreenCallCount;
+  elements.get('unlock-pin-input').value = 'TCH-GUARD-99';
+  const unlockPromise = elements.get('unlock-form').dispatch('submit', { preventDefault() {} });
+  assert.equal(fullscreenCallCount, beforeUnlockFs + 1);
+  await unlockPromise;
+});

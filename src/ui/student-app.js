@@ -24,6 +24,7 @@ const MEDIA_SAMPLE_INTERVAL_MS = 2000;
 const WATERMARK_REFRESH_INTERVAL_MS = 10000;
 const HEARTBEAT_INTERVAL_MS = 15000;
 const TOAST_AUTO_HIDE_MS = 6000;
+const POST_UNLOCK_GRACE_MS = 3000;
 
 const BLOCKED_REASON_MESSAGES = {
   AUTOMATION_DETECTED:
@@ -189,6 +190,7 @@ export function createExamSessionController(deps) {
   let micSpikes = 0;
   let consecutiveBlackFrames = 0;
   let consecutiveSpeechSpikes = 0;
+  let unlockGraceUntil = null;
 
   function ensureStarted() {
     if (!strikeEngine || !telemetryClient) {
@@ -322,6 +324,7 @@ export function createExamSessionController(deps) {
     micSpikes = 0;
     consecutiveBlackFrames = 0;
     consecutiveSpeechSpikes = 0;
+    unlockGraceUntil = null;
 
     strikeEngine = createStrikeEngine({
       sessionKey: `proctor_strikes_${sessionId}`,
@@ -391,14 +394,30 @@ export function createExamSessionController(deps) {
 
   async function evaluateTick(runtimeSnapshot, nowMs = Date.now(), snapshotBase64 = null) {
     ensureStarted();
+    const currentMs = Number.isFinite(nowMs) ? nowMs : Date.now();
     const integrity = evaluateRuntimeIntegrity({
       deviceType,
       ...runtimeSnapshot,
     });
 
+    if (unlockGraceUntil !== null) {
+      if (integrity.ok || currentMs >= unlockGraceUntil) {
+        unlockGraceUntil = null;
+      } else {
+        return {
+          ok: false,
+          violation: integrity.violation,
+          counted: false,
+          alertMessage: null,
+          gracePeriod: true,
+          ...strikeEngine.getState(),
+        };
+      }
+    }
+
     let strikeResult = null;
     if (!integrity.ok && integrity.violation) {
-      strikeResult = await recordViolationAndNotify(integrity.violation, nowMs, snapshotBase64);
+      strikeResult = await recordViolationAndNotify(integrity.violation, currentMs, snapshotBase64);
     }
 
     return {
@@ -482,19 +501,26 @@ export function createExamSessionController(deps) {
     );
   }
 
-  async function unlockExam(teacherPin) {
+  async function unlockExam(teacherPin, nowMs = Date.now()) {
     ensureStarted();
     const result = await strikeEngine.attemptTeacherUnlock(teacherPin);
     if (result.unlocked) {
+      const currentMs = Number.isFinite(nowMs) ? nowMs : Date.now();
       consecutiveBlackFrames = 0;
       consecutiveSpeechSpikes = 0;
-      await safeEnqueue('UNLOCK', {
-        strikes: result.strikes,
-        locked: false,
-        reason: 'TEACHER_UNLOCK',
-        cameraOk,
-        micSpikes,
-      });
+      unlockGraceUntil = currentMs + POST_UNLOCK_GRACE_MS;
+      // Enqueue asynchronously so unlock resolves immediately without blocking on webhook latency.
+      void safeEnqueue(
+        'UNLOCK',
+        {
+          strikes: result.strikes,
+          locked: false,
+          reason: 'TEACHER_UNLOCK',
+          cameraOk,
+          micSpikes,
+        },
+        new Date(currentMs).toISOString()
+      ).catch(() => {});
     }
     return result;
   }
@@ -595,6 +621,7 @@ export function initStudentPage(
   const policySummary = doc.getElementById('policy-summary');
   const startError = doc.getElementById('start-error');
   const startForm = doc.getElementById('start-form');
+  const startExamBtn = doc.getElementById('start-exam-btn');
   const studentNameInput = doc.getElementById('student-name');
   const rollIdInput = doc.getElementById('roll-id');
   const examPinInput = doc.getElementById('exam-pin');
@@ -617,6 +644,7 @@ export function initStudentPage(
   const lockoutMessage = doc.getElementById('lockout-message');
   const unlockError = doc.getElementById('unlock-error');
   const unlockForm = doc.getElementById('unlock-form');
+  const unlockSubmitBtn = doc.getElementById('unlock-submit-btn');
   const unlockPinInput = doc.getElementById('unlock-pin-input');
 
   function showOnlyView(viewToShow) {
@@ -1267,8 +1295,19 @@ export function initStudentPage(
   }
 
   if (startForm) {
+    let isStarting = false;
+    const setStartPending = (pending) => {
+      isStarting = pending;
+      if (startExamBtn) {
+        startExamBtn.disabled = pending;
+      }
+    };
+
     startForm.addEventListener('submit', async (event) => {
       event.preventDefault();
+      if (isStarting) {
+        return;
+      }
       if (startError) {
         startError.hidden = true;
         startError.textContent = '';
@@ -1287,6 +1326,7 @@ export function initStudentPage(
         return;
       }
 
+      setStartPending(true);
       let stream = null;
       try {
         if (!nav?.mediaDevices?.getUserMedia) {
@@ -1302,6 +1342,7 @@ export function initStudentPage(
             'Camera and Microphone permission is required. Chrome: click the lock icon in the address bar -> Permissions -> Allow Camera & Mic. iPhone Safari: tap AA -> Website Settings -> Allow Camera & Microphone.';
           startError.hidden = false;
         }
+        setStartPending(false);
         return;
       }
 
@@ -1382,34 +1423,55 @@ export function initStudentPage(
           startError.textContent = msg;
           startError.hidden = false;
         }
+        setStartPending(false);
       }
     });
   }
 
   if (unlockForm) {
+    let isUnlocking = false;
     unlockForm.addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (unlockError) {
-        unlockError.hidden = true;
-        unlockError.textContent = '';
-      }
-
-      const candidatePin = unlockPinInput?.value || '';
-      const res = await controller.unlockExam(candidatePin);
-      if (!res.unlocked) {
-        if (unlockError) {
-          unlockError.textContent = 'Invalid Teacher Unlock Key. Please try again.';
-          unlockError.hidden = false;
-        }
+      if (isUnlocking) {
         return;
       }
-
-      if (unlockPinInput) {
-        unlockPinInput.value = '';
+      isUnlocking = true;
+      if (unlockSubmitBtn) {
+        unlockSubmitBtn.disabled = true;
       }
-      applyLockoutUI(false);
-      updateHudState({ strikes: res.strikes, maxStrikes: meta.maxStrikes, locked: false });
-      requestFullscreenSafe();
+
+      // Request fullscreen synchronously before async PIN hashing so user-gesture activation stays valid.
+      if (envCheck.supportsFullscreen) {
+        requestFullscreenSafe();
+      }
+
+      try {
+        if (unlockError) {
+          unlockError.hidden = true;
+          unlockError.textContent = '';
+        }
+
+        const candidatePin = unlockPinInput?.value || '';
+        const res = await controller.unlockExam(candidatePin);
+        if (!res.unlocked) {
+          if (unlockError) {
+            unlockError.textContent = 'Invalid Teacher Unlock Key. Please try again.';
+            unlockError.hidden = false;
+          }
+          return;
+        }
+
+        if (unlockPinInput) {
+          unlockPinInput.value = '';
+        }
+        applyLockoutUI(false);
+        updateHudState({ strikes: res.strikes, maxStrikes: meta.maxStrikes, locked: false });
+      } finally {
+        isUnlocking = false;
+        if (unlockSubmitBtn) {
+          unlockSubmitBtn.disabled = false;
+        }
+      }
     });
   }
 }
