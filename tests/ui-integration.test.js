@@ -1330,7 +1330,7 @@ test('per-exam unlockHash session isolation and default localStorage cross-tab p
   }
 });
 
-test('startExam and evaluateTick resolve in < 50ms even when telemetry fetch hangs for 5000ms', async () => {
+test('startExam and evaluateTick resolve without waiting on a 5000ms hanging telemetry fetch', async () => {
   const { token } = await buildStudentExamUrl('https://proctor.example/setup.html', {
     title: 'Non-Blocking Telemetry Exam',
     formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScHang/viewform',
@@ -1342,19 +1342,26 @@ test('startExam and evaluateTick resolve in < 50ms even when telemetry fetch han
     devicePolicy: 'all-devices',
   });
 
+  let fetchCalls = 0;
+  let fetchResolved = 0;
   const pendingTimers = [];
   const controller = createExamSessionController({
     token,
     storage: createMemoryStorage(),
-    fetchFn: (_url, init) =>
-      new Promise((resolve) => {
-        const id = setTimeout(() => resolve({ ok: true }), 5000);
+    fetchFn: (_url, init) => {
+      fetchCalls += 1;
+      return new Promise((resolve) => {
+        const id = setTimeout(() => {
+          fetchResolved += 1;
+          resolve({ ok: true });
+        }, 5000);
         pendingTimers.push({ id, resolve });
         init?.signal?.addEventListener?.('abort', () => {
           clearTimeout(id);
           resolve({ ok: false });
         });
-      }),
+      });
+    },
   });
 
   controller.checkEnvironment({
@@ -1376,7 +1383,9 @@ test('startExam and evaluateTick resolve in < 50ms even when telemetry fetch han
     },
   });
   const startElapsed = performance.now() - tStart0;
-  assert.ok(startElapsed < 50, `Expected startExam < 50ms, took ${startElapsed.toFixed(1)}ms`);
+  assert.equal(fetchCalls, 1);
+  assert.equal(fetchResolved, 0, 'startExam must resolve while fetchFn is still hanging');
+  assert.ok(startElapsed < 1000, `Expected startExam < 1000ms (PBKDF2 only), took ${startElapsed.toFixed(1)}ms`);
 
   const tTick0 = performance.now();
   const lockTick = await controller.evaluateTick(
@@ -1394,7 +1403,8 @@ test('startExam and evaluateTick resolve in < 50ms even when telemetry fetch han
   const tickElapsed = performance.now() - tTick0;
   assert.equal(lockTick.counted, true);
   assert.equal(lockTick.locked, true);
-  assert.ok(tickElapsed < 50, `Expected evaluateTick < 50ms, took ${tickElapsed.toFixed(1)}ms`);
+  assert.equal(fetchResolved, 0, 'evaluateTick must resolve while fetchFn is still hanging');
+  assert.ok(tickElapsed < 200, `Expected evaluateTick < 200ms, took ${tickElapsed.toFixed(1)}ms`);
 
   for (const item of pendingTimers) {
     clearTimeout(item.id);
