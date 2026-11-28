@@ -465,6 +465,7 @@ function doPost(e) {
 
 /**
  * Generate an unambiguous uppercase alphanumeric access key like EXM-9X4K-2P7M.
+ * TCH keys get a third group: their hash travels in every student link, so they must resist offline guessing.
  * @param {string} [prefix='EXM']
  * @returns {string}
  */
@@ -474,11 +475,12 @@ export function generateAccessKey(prefix = 'EXM') {
       ? prefix.trim().toUpperCase().replace(/[^A-Z0-9]/g, '') || 'EXM'
       : 'EXM';
 
+  const groupCount = cleanPrefix === 'TCH' ? 3 : 2;
   let chars = '';
   // Re-draw until the random part mixes letters and digits, so generated keys always
   // satisfy the Teacher Unlock Key strength rule (an all-letter draw happens ~10% of the time).
   do {
-    const randomBytes = globalThis.crypto.getRandomValues(new Uint8Array(8));
+    const randomBytes = globalThis.crypto.getRandomValues(new Uint8Array(groupCount * 4));
     chars = '';
     for (let i = 0; i < randomBytes.length; i += 1) {
       // KEY_ALPHABET has 32 chars so (byte & 31) has zero modulo bias.
@@ -486,7 +488,7 @@ export function generateAccessKey(prefix = 'EXM') {
     }
   } while (!/[0-9]/.test(chars) || !/[A-Z]/.test(chars));
 
-  return `${cleanPrefix}-${chars.slice(0, 4)}-${chars.slice(4, 8)}`;
+  return [cleanPrefix, ...chars.match(/.{4}/g)].join('-');
 }
 
 /**
