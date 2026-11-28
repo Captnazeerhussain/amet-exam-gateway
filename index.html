@@ -194,6 +194,31 @@
                 </button>
               </div>
             </form>
+
+            <details id="teacher-reset-panel" class="setup-guide">
+              <summary>Invigilator: Clear Browser &amp; Google ID for Re-Exam</summary>
+              <p class="field-hint">
+                Clears this browser&rsquo;s saved exam session, submission lock, and strike history, and opens Google Account sign-out so a re-exam or next candidate can start fresh.
+              </p>
+              <div id="teacher-reset-error" class="alert-banner alert-error" role="alert" hidden></div>
+              <div id="teacher-reset-success" class="gate-status-pill gate-status-ok" hidden></div>
+              <div class="field-group">
+                <label for="teacher-reset-pin">Teacher Unlock Key</label>
+                <input
+                  id="teacher-reset-pin"
+                  name="teacherResetPin"
+                  type="password"
+                  placeholder="TCH-7M2P-9Q4W"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+              <div class="form-actions">
+                <button type="button" id="teacher-reset-btn" class="btn btn-secondary btn-block">
+                  Clear Browser &amp; Sign Out Google ID for Re-Exam
+                </button>
+              </div>
+            </details>
           </div>
         </div>
       </section>
@@ -211,9 +236,6 @@
         </div>
         <div class="topbar-right">
           <span id="strike-pill" class="strike-pill">Strikes: 0 / 3</span>
-          <button type="button" id="view-score-btn" class="btn btn-topbar-score btn-sm">
-            View Score
-          </button>
           <button type="button" id="reenter-fullscreen-btn" class="btn btn-topbar-fs btn-sm" hidden>
             Re-enter Fullscreen
           </button>
@@ -221,6 +243,9 @@
             <span class="live-pulse-dot" aria-hidden="true"></span>
             LIVE PROCTORED
           </span>
+          <button type="button" id="view-score-btn" class="btn btn-topbar-score btn-sm">
+            View Score
+          </button>
         </div>
       </header>
 
@@ -287,7 +312,7 @@
               <input
                 id="unlock-pin-input"
                 name="unlockPin"
-                type="text"
+                type="password"
                 required
                 placeholder="TCH-7M2P-9Q4W"
                 autocomplete="off"
@@ -308,7 +333,7 @@
           <div class="badge-pill badge-success">VIEW SCORE • NO MALPRACTICE</div>
           <h2 id="view-score-title">Confirm Form Saved &amp; View Score</h2>
           <p class="subtitle">
-            Selecting <strong>View Score</strong> does not count as malpractice. Once you confirm that your Google Form is saved and submitted, access to the exam form will become permanently obsolete and only your score will be visible.
+            Selecting <strong>View Score</strong> does not count as malpractice. Once you confirm that your Google Form is saved and submitted, access to the exam form will become permanently obsolete and only your score will be visible. Your invigilator must check that the form is submitted and enter the Teacher Unlock Key.
           </p>
 
           <div id="view-score-error" class="alert-banner alert-error" role="alert" hidden></div>
@@ -326,6 +351,18 @@
             <span class="field-hint">
               If you opened or copied the Google Form &ldquo;View score&rdquo; link, paste it here to display your score directly, or leave blank if your score is already open in another tab.
             </span>
+          </div>
+
+          <div class="field-group">
+            <label for="view-score-teacher-pin">Teacher Unlock Key (Invigilator)</label>
+            <input
+              id="view-score-teacher-pin"
+              name="viewScoreTeacherPin"
+              type="password"
+              placeholder="Entered by your invigilator"
+              autocomplete="off"
+              spellcheck="false"
+            />
           </div>
 
           <div class="view-score-actions">
@@ -372,6 +409,9 @@
           >
             Open Score in New Tab
           </a>
+          <button type="button" id="submitted-reexam-btn" class="btn btn-secondary btn-block">
+            Invigilator: Clear Browser &amp; Google ID for Re-Exam
+          </button>
         </div>
       </section>
     </main>

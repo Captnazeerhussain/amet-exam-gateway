@@ -56,6 +56,14 @@ function createMemoryStorage() {
   return {
     getItem: (key) => (store.has(key) ? store.get(key) : null),
     setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key),
+    clearProctorKeys: () => {
+      for (const key of Array.from(store.keys())) {
+        if (key.startsWith('proctor_')) {
+          store.delete(key);
+        }
+      }
+    },
   };
 }
 
@@ -121,6 +129,49 @@ function createResilientStorage(backingStorage) {
         backingStorage?.setItem?.(key, str);
       } catch {
         writeFailed = true;
+      }
+    },
+    removeItem(key) {
+      fallback.delete(key);
+      try {
+        if (typeof backingStorage?.removeItem === 'function') {
+          backingStorage.removeItem(key);
+        } else if (typeof backingStorage?.setItem === 'function') {
+          backingStorage.setItem(key, '');
+        }
+      } catch {
+        // Ignore storage removal errors in restricted contexts.
+      }
+    },
+    clearProctorKeys() {
+      for (const key of Array.from(fallback.keys())) {
+        if (key.startsWith('proctor_')) {
+          fallback.delete(key);
+        }
+      }
+      try {
+        if (typeof backingStorage?.clearProctorKeys === 'function') {
+          backingStorage.clearProctorKeys();
+          return;
+        }
+        if (typeof backingStorage?.length === 'number' && typeof backingStorage?.key === 'function') {
+          const keysToRemove = [];
+          for (let i = 0; i < backingStorage.length; i += 1) {
+            const k = backingStorage.key(i);
+            if (typeof k === 'string' && k.startsWith('proctor_')) {
+              keysToRemove.push(k);
+            }
+          }
+          for (const k of keysToRemove) {
+            if (typeof backingStorage.removeItem === 'function') {
+              backingStorage.removeItem(k);
+            } else if (typeof backingStorage.setItem === 'function') {
+              backingStorage.setItem(k, '');
+            }
+          }
+        }
+      } catch {
+        // Ignore storage enumeration errors in restricted contexts.
       }
     },
   };
@@ -878,12 +929,87 @@ export function createExamSessionController(deps) {
     };
   }
 
+  /**
+   * @param {string} teacherPin
+   * @returns {Promise<boolean>}
+   */
+  async function verifyTeacherPin(teacherPin) {
+    const cleanPin = typeof teacherPin === 'string' ? teacherPin.trim() : '';
+    return Boolean(cleanPin) && verifyPin(cleanPin, meta.unlockSalt, meta.unlockHash);
+  }
+
   function selectViewScore({ nowIso = new Date().toISOString() } = {}) {
     return markSubmitted({ reason: 'VIEW_SCORE_SELECTED', nowIso, viewingScore: true });
   }
 
   function isSubmittedOrViewingScore() {
     return isSubmitted || isViewingScore;
+  }
+
+  /**
+   * Clear browser-side proctor state (session, submission lock, strike history, queued telemetry)
+   * after verifying the Teacher Unlock Key so a re-exam or new candidate can start fresh.
+   * @param {string} teacherPin
+   * @param {string} [rollId='']
+   * @returns {Promise<{ cleared: boolean }>}
+   */
+  async function clearBrowserForReExam(teacherPin, rollId = '') {
+    if (!(await verifyTeacherPin(teacherPin))) {
+      return { cleared: false };
+    }
+
+    const hashPrefix = meta.unlockHash.slice(0, 16);
+    const candidateRolls = new Set();
+    const cleanRoll = typeof rollId === 'string' ? rollId.trim() : '';
+    if (cleanRoll) {
+      candidateRolls.add(cleanRoll);
+    }
+    if (activeRollId) {
+      candidateRolls.add(activeRollId);
+    }
+    const usedRoll = safeStorageGet(sessionStore, `proctor_used_${hashPrefix}`);
+    if (usedRoll) {
+      candidateRolls.add(usedRoll);
+    }
+
+    for (const r of candidateRolls) {
+      const sessKey = `proctor_session_${r}_${hashPrefix}`;
+      const existingSessId = safeStorageGet(sessionStore, sessKey);
+      if (existingSessId) {
+        sessionStore.removeItem?.(`proctor_strikes_${existingSessId}`);
+        telemetryStore.removeItem?.(`proctor_queue_${existingSessId}`);
+      }
+      sessionStore.removeItem?.(sessKey);
+      sessionStore.removeItem?.(`proctor_submitted_${r}_${hashPrefix}`);
+    }
+    if (activeSessionId) {
+      sessionStore.removeItem?.(`proctor_strikes_${activeSessionId}`);
+      telemetryStore.removeItem?.(`proctor_queue_${activeSessionId}`);
+    }
+    sessionStore.removeItem?.(`proctor_used_${hashPrefix}`);
+    sessionStore.clearProctorKeys?.();
+    if (telemetryStore !== sessionStore) {
+      telemetryStore.clearProctorKeys?.();
+    }
+
+    activeStudentName = '';
+    activeRollId = '';
+    activeExamTitle = '';
+    activeSessionId = '';
+    strikeEngine = null;
+    telemetryClient = null;
+    cameraOk = true;
+    micSpikes = 0;
+    consecutiveBlackFrames = 0;
+    consecutiveSpeechSpikes = 0;
+    unlockGraceUntil = null;
+    mediaGraceUntil = null;
+    fullscreenLostAtMs = null;
+    blurStartedAtMs = null;
+    isSubmitted = false;
+    isViewingScore = false;
+
+    return { cleared: true };
   }
 
   return {
@@ -895,9 +1021,11 @@ export function createExamSessionController(deps) {
     recordExternalViolation,
     sendHeartbeat,
     unlockExam,
+    verifyTeacherPin,
     selectViewScore,
     markSubmitted,
     isSubmittedOrViewingScore,
+    clearBrowserForReExam,
     getRefreshWatermark,
     formatCurrentAlert,
   };
@@ -972,6 +1100,12 @@ export function initStudentPage(
   const confirmEnvCheckbox = doc.getElementById('confirm-environment-checkbox');
   const resumeFieldGroup = doc.getElementById('resume-field-group');
   const resumePinInput = doc.getElementById('resume-pin');
+  const teacherResetPanel = doc.getElementById('teacher-reset-panel');
+  const teacherResetPinInput = doc.getElementById('teacher-reset-pin');
+  const teacherResetBtn = doc.getElementById('teacher-reset-btn');
+  const teacherResetError = doc.getElementById('teacher-reset-error');
+  const teacherResetSuccess = doc.getElementById('teacher-reset-success');
+  const submittedReexamBtn = doc.getElementById('submitted-reexam-btn');
   const examTitleDisplay = doc.getElementById('exam-title-display');
 
   const examStage = doc.getElementById('exam-stage');
@@ -1001,6 +1135,7 @@ export function initStudentPage(
   const viewScoreConfirmOverlay = doc.getElementById('view-score-confirm-overlay');
   const viewScoreError = doc.getElementById('view-score-error');
   const scoreUrlInput = doc.getElementById('score-url-input');
+  const viewScoreTeacherPinInput = doc.getElementById('view-score-teacher-pin');
   const confirmViewScoreBtn = doc.getElementById('confirm-view-score-btn');
   const cancelViewScoreBtn = doc.getElementById('cancel-view-score-btn');
   const submittedView = doc.getElementById('submitted-view');
@@ -2474,6 +2609,90 @@ export function initStudentPage(
         setStartPending(false);
       }
     });
+
+    if (teacherResetBtn) {
+      teacherResetBtn.addEventListener('click', async () => {
+        if (teacherResetError) {
+          teacherResetError.hidden = true;
+          teacherResetError.textContent = '';
+        }
+        if (teacherResetSuccess) {
+          teacherResetSuccess.hidden = true;
+          teacherResetSuccess.textContent = '';
+        }
+
+        const pin = teacherResetPinInput?.value || '';
+        const res = await controller.clearBrowserForReExam(pin, rollIdInput?.value || '');
+        if (!res.cleared) {
+          if (teacherResetError) {
+            teacherResetError.textContent = 'Invalid Teacher Unlock Key. Ask your invigilator to enter the exact Teacher Unlock Key.';
+            teacherResetError.hidden = false;
+          }
+          return;
+        }
+
+        if (teacherResetPinInput) {
+          teacherResetPinInput.value = '';
+        }
+        if (studentNameInput) studentNameInput.value = '';
+        if (rollIdInput) rollIdInput.value = '';
+        if (examPinInput) examPinInput.value = '';
+        if (resumePinInput) resumePinInput.value = '';
+        if (scoreUrlInput) scoreUrlInput.value = '';
+        if (confirmEnvCheckbox) confirmEnvCheckbox.checked = false;
+        if (resumeFieldGroup) resumeFieldGroup.hidden = true;
+        if (startError) {
+          startError.hidden = true;
+          startError.textContent = '';
+        }
+
+        if (googleSignInPollTimer) {
+          clearInterval(googleSignInPollTimer);
+          googleSignInPollTimer = null;
+        }
+        hasConfirmedGoogleSignIn = !googleSignInGateBtn;
+        hasConfirmedFullscreenGate = !enterFullscreenGateBtn;
+        if (googleSignInStatus) {
+          googleSignInStatus.textContent =
+            'Step 0 Required: Sign in to Google Account before entering Fullscreen (use a normal non-Incognito browser with third-party cookies enabled).';
+        }
+        setStartPending(false);
+        syncPreStartGate();
+
+        isExamActive = false;
+        showOnlyView(startGate);
+
+        let signoutPopupOpened = false;
+        try {
+          const popup = win?.open?.(
+            'https://accounts.google.com/Logout?continue=https://accounts.google.com/ServiceLogin?continue=https://docs.google.com/forms/',
+            'amet_google_signout',
+            'width=520,height=660'
+          );
+          signoutPopupOpened = Boolean(popup);
+        } catch {
+          signoutPopupOpened = false;
+        }
+
+        if (teacherResetSuccess) {
+          teacherResetSuccess.textContent = signoutPopupOpened
+            ? 'Browser cleared for re-exam. Sign out of the previous Google ID in the popup, then complete Step 0.'
+            : 'Browser cleared for re-exam. Sign out of the previous Google ID in your browser, then complete Step 0.';
+          teacherResetSuccess.hidden = false;
+        }
+      });
+    }
+  }
+
+  if (submittedReexamBtn) {
+    submittedReexamBtn.addEventListener('click', () => {
+      isExamActive = false;
+      showOnlyView(startGate);
+      if (teacherResetPanel) {
+        teacherResetPanel.open = true;
+      }
+      teacherResetPinInput?.focus?.();
+    });
   }
 
   if (unlockForm) {
@@ -2527,15 +2746,31 @@ export function initStudentPage(
     });
   }
 
+  // Bumped on every open/cancel so a key check still in flight cannot close the exam afterwards.
+  let viewScoreAttempt = 0;
+  const resetViewScoreDialog = () => {
+    viewScoreAttempt += 1;
+    if (viewScoreTeacherPinInput) {
+      viewScoreTeacherPinInput.value = '';
+    }
+    if (viewScoreError) {
+      viewScoreError.hidden = true;
+      viewScoreError.textContent = '';
+    }
+  };
+  const showViewScoreError = (message) => {
+    if (viewScoreError) {
+      viewScoreError.textContent = message;
+      viewScoreError.hidden = false;
+    }
+  };
+
   if (viewScoreBtn) {
     viewScoreBtn.addEventListener('click', () => {
       if (!isExamActive) {
         return;
       }
-      if (viewScoreError) {
-        viewScoreError.hidden = true;
-        viewScoreError.textContent = '';
-      }
+      resetViewScoreDialog();
       if (viewScoreConfirmOverlay) {
         viewScoreConfirmOverlay.hidden = false;
       }
@@ -2547,27 +2782,32 @@ export function initStudentPage(
       if (viewScoreConfirmOverlay) {
         viewScoreConfirmOverlay.hidden = true;
       }
-      if (viewScoreError) {
-        viewScoreError.hidden = true;
-        viewScoreError.textContent = '';
-      }
+      resetViewScoreDialog();
     });
   }
 
   if (confirmViewScoreBtn) {
-    confirmViewScoreBtn.addEventListener('click', () => {
+    confirmViewScoreBtn.addEventListener('click', async () => {
       if (!isExamActive) {
         return;
       }
       const rawScoreUrl = scoreUrlInput?.value?.trim() || '';
       if (rawScoreUrl && !isValidGoogleScoreUrl(rawScoreUrl)) {
-        if (viewScoreError) {
-          viewScoreError.textContent =
-            'Enter a valid Google Forms "viewscore" link (https://docs.google.com/forms/.../viewscore) or leave the field blank.';
-          viewScoreError.hidden = false;
-        }
+        showViewScoreError(
+          'Enter a valid Google Forms "viewscore" link (https://docs.google.com/forms/.../viewscore) or leave the field blank.'
+        );
         return;
       }
+      const attempt = viewScoreAttempt;
+      const keyOk = await controller.verifyTeacherPin(viewScoreTeacherPinInput?.value || '');
+      if (attempt !== viewScoreAttempt || !isExamActive) {
+        return;
+      }
+      if (!keyOk) {
+        showViewScoreError('Invalid Teacher Unlock Key. Ask your invigilator to enter it.');
+        return;
+      }
+      resetViewScoreDialog();
       enterSubmittedScoreView(rawScoreUrl);
     });
   }
