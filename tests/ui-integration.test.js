@@ -2272,3 +2272,165 @@ test('server-side claim check rejects KEY_ALREADY_USED across fresh Incognito st
     /KEY_ALREADY_USED/
   );
 });
+
+test('initStudentPage locks Step 1 and Step 2 until Step 0 Google Sign-In popup completes', async () => {
+  const { examUrl } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: '261NS1A14PD — Google Sign-In Gate',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScGoogleGate/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-GOOG-2026',
+    unlockPin: 'TCH-GOOG-99',
+    maxStrikes: 2,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const ids = [
+    'proctor-app',
+    'missing-exam-view',
+    'blocked-view',
+    'blocked-reasons',
+    'start-gate',
+    'policy-summary',
+    'start-error',
+    'start-form',
+    'google-signin-gate-btn',
+    'google-signin-status',
+    'enter-fullscreen-gate-btn',
+    'fullscreen-gate-status',
+    'start-exam-btn',
+    'student-name',
+    'roll-id',
+    'exam-pin',
+    'confirm-environment-checkbox',
+    'exam-stage',
+    'exam-iframe',
+    'stealth-watermark-layer',
+    'ai-canary-layer',
+    'moire-shield-layer',
+    'proctor-hud',
+    'hud-video',
+    'camera-status-dot',
+    'camera-status-text',
+    'mic-meter-fill',
+    'strike-pill',
+    'exam-title-display',
+    'active-candidate-badge',
+    'malpractice-toast',
+    'malpractice-toast-message',
+    'lockout-overlay',
+    'lockout-reason-text',
+    'unlock-form',
+    'unlock-pin',
+    'unlock-error',
+  ];
+  const makeEl = (id) => ({
+    id,
+    hidden: false,
+    disabled: id === 'start-exam-btn' || id === 'enter-fullscreen-gate-btn',
+    checked: id === 'confirm-environment-checkbox',
+    textContent: '',
+    value: '',
+    src: '',
+    style: {},
+    children: [],
+    classList: { add() {}, remove() {} },
+    listeners: {},
+    addEventListener(type, fn) {
+      if (!this.listeners[type]) this.listeners[type] = [];
+      this.listeners[type].push(fn);
+    },
+    async dispatch(type, ev = {}) {
+      for (const fn of this.listeners[type] || []) {
+        await fn(ev);
+      }
+    },
+    appendChild(child) {
+      this.children.push(child);
+    },
+  });
+  const elements = new Map(ids.map((id) => [id, makeEl(id)]));
+  elements.get('student-name').value = 'Riya Patel';
+  elements.get('roll-id').value = '261NS1A1401';
+  elements.get('exam-pin').value = 'EXM-GOOG-2026';
+  elements.get('confirm-environment-checkbox').checked = true;
+
+  let isFs = false;
+  const doc = {
+    location: { href: examUrl },
+    documentElement: {
+      requestFullscreen: async () => {
+        isFs = true;
+        await docListeners.get('fullscreenchange')?.[0]?.();
+      },
+    },
+    body: null,
+    get fullscreenElement() {
+      return isFs ? doc.documentElement : null;
+    },
+    visibilityState: 'visible',
+    hasFocus: () => true,
+    getElementById: (id) => elements.get(id) ?? null,
+    createElement: (tag) => makeEl(tag),
+    addEventListener(type, fn) {
+      if (!docListeners.has(type)) docListeners.set(type, []);
+      docListeners.get(type).push(fn);
+    },
+    removeEventListener() {},
+  };
+  const docListeners = new Map();
+
+  let popupToReturn = null;
+  const win = {
+    location: { href: examUrl },
+    innerWidth: 1920,
+    innerHeight: 1080,
+    screen: { width: 1920, height: 1080, isExtended: false },
+    open: () => popupToReturn,
+    addEventListener() {},
+    removeEventListener() {},
+    navigator: {
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+      webdriver: false,
+      mediaDevices: {
+        getUserMedia: async () => ({
+          getVideoTracks: () => [{ label: 'HD Webcam', readyState: 'live', enabled: true, muted: false, stop() {} }],
+          getAudioTracks: () => [{ label: 'Mic', readyState: 'live', enabled: true, muted: false, stop() {} }],
+        }),
+      },
+    },
+  };
+
+  initStudentPage(doc, win);
+
+  // Initially Step 1 and Step 2 are disabled
+  assert.equal(elements.get('enter-fullscreen-gate-btn').disabled, true);
+  assert.equal(elements.get('start-exam-btn').disabled, true);
+
+  // Clicking Step 1 before Step 0 does not unlock Step 2
+  await elements.get('enter-fullscreen-gate-btn').dispatch('click', { preventDefault() {} });
+  assert.equal(elements.get('start-exam-btn').disabled, true);
+  assert.equal(elements.get('start-error').hidden, false);
+
+  // If popup is blocked, Step 1 stays disabled
+  popupToReturn = null;
+  await elements.get('google-signin-gate-btn').dispatch('click', { preventDefault() {} });
+  assert.equal(elements.get('enter-fullscreen-gate-btn').disabled, true);
+  assert.match(elements.get('google-signin-status').textContent, /Popup blocked/i);
+
+  // When popup opens and then closes, Step 1 unlocks
+  const mockPopup = { closed: false };
+  popupToReturn = mockPopup;
+  await elements.get('google-signin-gate-btn').dispatch('click', { preventDefault() {} });
+  assert.equal(elements.get('enter-fullscreen-gate-btn').disabled, true);
+
+  mockPopup.closed = true;
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(elements.get('enter-fullscreen-gate-btn').disabled, false);
+  assert.match(elements.get('google-signin-status').textContent, /completed/i);
+
+  // Now Step 1 enters fullscreen and unlocks Step 2
+  await elements.get('enter-fullscreen-gate-btn').dispatch('click', { preventDefault() {} });
+  assert.equal(isFs, true);
+  assert.equal(elements.get('start-exam-btn').disabled, false);
+});

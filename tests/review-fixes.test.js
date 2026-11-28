@@ -344,6 +344,9 @@ function createDom({ examUrl, getUserMedia, fullscreenDelayMs = 0 }) {
     fireDoc: async (type) => {
       for (const fn of docListeners.get(type) || []) await fn();
     },
+    fireWin: async (type) => {
+      for (const fn of winListeners.get(type) || []) await fn();
+    },
     counts: () => ({ wakeLockRequests, gumCalls }),
     releaseWakeLock: () => {
       if (lastSentinel) lastSentinel.released = true;
@@ -443,4 +446,35 @@ test('KEY_ALREADY_USED reveals the Invigilator Resume Key field', async () => {
     if (realLocal === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = realLocal;
   }
+});
+
+test('clicking into exam-iframe does not trigger false WINDOW_BLUR strike, while sustained blur does', async () => {
+  const { examUrl } = await makeToken();
+  const dom = createDom({ examUrl, getUserMedia: async () => makeStream() });
+  let focused = true;
+  dom.doc.hasFocus = () => focused;
+  initStudentPage(dom.doc, dom.win);
+  await startPage(dom);
+
+  // Simulate clicking inside #exam-iframe: activeElement becomes exam-iframe,
+  // win.blur fires with hasFocus() momentarily false, then settles back to true.
+  dom.doc.activeElement = dom.elements.get('exam-iframe');
+  focused = false;
+  await dom.fireWin('blur');
+  await flush();
+  assert.equal(dom.elements.get('strike-pill').textContent, 'Strikes: 0 / 3');
+
+  // Focus settles back to true within 500ms -> still 0 strikes even after blur timer fires.
+  focused = true;
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(dom.elements.get('strike-pill').textContent, 'Strikes: 0 / 3');
+
+  // Sustained Alt+Tab (hasFocus remains false past 500ms) -> counts WINDOW_BLUR strike.
+  focused = false;
+  const runtimeTick = dom.intervals.find((it) => it.ms === 350);
+  await runtimeTick.fn();
+  await new Promise((resolve) => setTimeout(resolve, 550));
+  await runtimeTick.fn();
+  await flush();
+  assert.equal(dom.elements.get('strike-pill').textContent, 'Strikes: 1 / 3');
 });

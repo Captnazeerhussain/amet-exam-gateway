@@ -175,16 +175,16 @@
 
               <div class="gate-step-actions">
                 <button type="button" id="google-signin-gate-btn" class="btn btn-secondary btn-block">
-                  Step 0 (If Required): Sign in to Google Account First
+                  Step 0 (Required): Sign in to Google Account First
                 </button>
-                <div id="google-signin-status" class="field-hint">
-                  If your exam form asks for Google Sign-In, sign in here <strong>before</strong> entering Fullscreen so it does not trigger a strike later.
+                <div id="google-signin-status" class="gate-status-pill gate-status-pending">
+                  Step 0 Required: Sign in to Google Account before entering Fullscreen (use a normal non-Incognito browser with third-party cookies enabled).
                 </div>
-                <button type="button" id="enter-fullscreen-gate-btn" class="btn btn-secondary btn-block">
+                <button type="button" id="enter-fullscreen-gate-btn" class="btn btn-secondary btn-block" disabled>
                   Step 1: Enter Fullscreen &amp; Confirm Other Tabs Closed
                 </button>
                 <div id="fullscreen-gate-status" class="gate-status-pill gate-status-pending">
-                  Step 1 Required: Enter Fullscreen mode first (close all other tabs/apps).
+                  Step 0 Required: Sign in to Google Account first to unlock Step 1.
                 </div>
               </div>
 

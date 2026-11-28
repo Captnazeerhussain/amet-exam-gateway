@@ -1902,14 +1902,48 @@ export function initStudentPage(
       }
     };
 
+    let blurCheckTimerId = null;
+    let iframeBlurSinceMs = null;
+
     const runRuntimeCheck = async () => {
       if (!isExamActive) {
         return;
       }
+      const nowMs = Date.now();
+      const isFullscreen = isCurrentlyFullscreen();
+      const visibilityState = doc.visibilityState || 'visible';
+      const rawHasFocus = typeof doc.hasFocus === 'function' ? doc.hasFocus() : true;
+      const isFocusedInExamIframe =
+        Boolean(examIframe) &&
+        doc.activeElement === examIframe &&
+        visibilityState === 'visible';
+
+      let effectiveHasFocus = rawHasFocus;
+      if (!rawHasFocus && isFocusedInExamIframe) {
+        if (envCheck.deviceType !== 'desktop') {
+          // Mobile browsers (especially iOS Safari / Android WebViews) often report
+          // document.hasFocus() === false while focus is inside a cross-origin iframe.
+          // App-switching on mobile is caught by visibilityState !== 'visible'.
+          effectiveHasFocus = true;
+        } else if (isFullscreen) {
+          // Clicking inside the cross-origin exam iframe or opening a native <select>
+          // inside it can briefly drop document.hasFocus() to false on desktop.
+          // Wait briefly before treating it as WINDOW_BLUR; real Alt-Tab stays blurred.
+          if (iframeBlurSinceMs === null) {
+            iframeBlurSinceMs = nowMs;
+          }
+          if (nowMs - iframeBlurSinceMs < 500) {
+            effectiveHasFocus = true;
+          }
+        }
+      } else {
+        iframeBlurSinceMs = null;
+      }
+
       const snapshot = {
-        isFullscreen: isCurrentlyFullscreen(),
-        hasFocus: typeof doc.hasFocus === 'function' ? doc.hasFocus() : true,
-        visibilityState: doc.visibilityState || 'visible',
+        isFullscreen,
+        hasFocus: effectiveHasFocus,
+        visibilityState,
         screenWidth: win?.screen?.width || win?.innerWidth || 0,
         screenHeight: win?.screen?.height || win?.innerHeight || 0,
         innerWidth: win?.innerWidth || 0,
@@ -2010,7 +2044,22 @@ export function initStudentPage(
       void runRuntimeCheck();
     });
     doc.addEventListener?.('fullscreenchange', () => void runRuntimeCheck());
-    win?.addEventListener?.('blur', () => void runRuntimeCheck());
+    win?.addEventListener?.('blur', () => {
+      if (blurCheckTimerId) {
+        clearTimeout(blurCheckTimerId);
+      }
+      blurCheckTimerId = setTimeout(() => {
+        blurCheckTimerId = null;
+        void runRuntimeCheck();
+      }, 250);
+    });
+    win?.addEventListener?.('focus', () => {
+      if (blurCheckTimerId) {
+        clearTimeout(blurCheckTimerId);
+        blurCheckTimerId = null;
+      }
+      iframeBlurSinceMs = null;
+    });
     win?.addEventListener?.('resize', () => void runRuntimeCheck());
 
     if (reenterFullscreenBtn) {
@@ -2111,23 +2160,39 @@ export function initStudentPage(
 
   if (startForm) {
     let isStarting = false;
+    let hasConfirmedGoogleSignIn = !googleSignInGateBtn;
     let hasConfirmedFullscreenGate = !enterFullscreenGateBtn;
+    let googleSignInPollTimer = null;
+
+    const isGateGoogleReady = () => !googleSignInGateBtn || hasConfirmedGoogleSignIn;
 
     const isGateFullscreenReady = () =>
       !enterFullscreenGateBtn ||
       (hasConfirmedFullscreenGate && (!envCheck.supportsFullscreen || isCurrentlyFullscreen()));
 
     const syncPreStartGate = () => {
+      const googleReady = isGateGoogleReady();
+      if (enterFullscreenGateBtn) {
+        enterFullscreenGateBtn.disabled = !googleReady;
+      }
+      if (googleSignInStatus && googleSignInGateBtn) {
+        googleSignInStatus.classList?.remove('gate-status-pending', 'gate-status-ok');
+        googleSignInStatus.classList?.add(googleReady ? 'gate-status-ok' : 'gate-status-pending');
+      }
       if (!enterFullscreenGateBtn) {
         return;
       }
-      const ready = isGateFullscreenReady();
+      const ready = googleReady && isGateFullscreenReady();
       if (startExamBtn && !isStarting) {
         startExamBtn.disabled = !ready;
       }
       if (fullscreenGateStatus) {
         fullscreenGateStatus.classList?.remove('gate-status-pending', 'gate-status-ok');
-        if (ready) {
+        if (!googleReady) {
+          fullscreenGateStatus.classList?.add('gate-status-pending');
+          fullscreenGateStatus.textContent =
+            'Step 0 Required: Sign in to Google Account first to unlock Step 1.';
+        } else if (ready) {
           fullscreenGateStatus.classList?.add('gate-status-ok');
           fullscreenGateStatus.textContent =
             'Fullscreen Active & Other Tabs Confirmed — You may now click Verify Hardware & Begin Examination.';
@@ -2142,25 +2207,65 @@ export function initStudentPage(
     const setStartPending = (pending) => {
       isStarting = pending;
       if (startExamBtn) {
-        startExamBtn.disabled = pending || !isGateFullscreenReady();
+        startExamBtn.disabled = pending || !(isGateGoogleReady() && isGateFullscreenReady());
       }
     };
 
     if (googleSignInGateBtn) {
+      const completeGoogleSignIn = () => {
+        if (googleSignInPollTimer) {
+          clearInterval(googleSignInPollTimer);
+          googleSignInPollTimer = null;
+        }
+        hasConfirmedGoogleSignIn = true;
+        if (googleSignInStatus) {
+          googleSignInStatus.textContent =
+            'Google Sign-In completed — proceed to Step 1 (Enter Fullscreen).';
+        }
+        syncPreStartGate();
+      };
+
       googleSignInGateBtn.addEventListener('click', () => {
+        if (googleSignInPollTimer) {
+          clearInterval(googleSignInPollTimer);
+          googleSignInPollTimer = null;
+        }
         try {
           const popup = win?.open?.(
-            'https://accounts.google.com/',
+            'https://accounts.google.com/ServiceLogin?continue=https://docs.google.com/forms/',
             'amet_google_signin',
             'width=520,height=660'
           );
-          if (googleSignInStatus) {
-            googleSignInStatus.textContent = popup
-              ? 'Google Sign-In opened. Complete sign-in, close that window, then proceed to Step 1.'
-              : 'Popup blocked — allow popups or sign into accounts.google.com in a tab, close it, then proceed to Step 1.';
+          if (!popup) {
+            if (googleSignInStatus) {
+              googleSignInStatus.textContent =
+                'Popup blocked — allow popups for this site and click Step 0 again to sign in.';
+            }
+            syncPreStartGate();
+            return;
           }
+          if (typeof popup.closed !== 'boolean') {
+            completeGoogleSignIn();
+            return;
+          }
+          if (googleSignInStatus) {
+            googleSignInStatus.textContent =
+              'Google Sign-In opened. Complete sign-in and close that window to unlock Step 1. (Use a normal non-Incognito browser with third-party cookies enabled.)';
+          }
+          googleSignInPollTimer = setInterval(() => {
+            try {
+              if (popup.closed) {
+                completeGoogleSignIn();
+              }
+            } catch {
+              completeGoogleSignIn();
+            }
+          }, 300);
         } catch {
-          // Ignore popup failures on restricted browsers.
+          if (googleSignInStatus) {
+            googleSignInStatus.textContent =
+              'Could not open Google Sign-In popup — allow popups for this site and retry Step 0.';
+          }
         }
       });
     }
@@ -2173,6 +2278,14 @@ export function initStudentPage(
         }
       });
       enterFullscreenGateBtn.addEventListener('click', async () => {
+        if (!isGateGoogleReady()) {
+          if (startError) {
+            startError.textContent = 'Complete Step 0 (Google Sign-In) before entering Fullscreen.';
+            startError.hidden = false;
+          }
+          syncPreStartGate();
+          return;
+        }
         if (startError) {
           startError.hidden = true;
           startError.textContent = '';
