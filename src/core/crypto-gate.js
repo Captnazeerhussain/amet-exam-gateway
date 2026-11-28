@@ -3,7 +3,10 @@ import { isValidRosterDigest } from './roster.js';
 const PBKDF2_ITERATIONS = 100_000;
 const SALT_BYTE_LENGTH = 16;
 const IV_BYTE_LENGTH = 12;
+const UNLOCK_HASH_BYTE_LENGTH = 32;
 const ENVELOPE_VERSION = 1;
+const ENVELOPE_VERSION_BINARY = 2;
+const BINARY_HEADER_LENGTH = 4 + SALT_BYTE_LENGTH + IV_BYTE_LENGTH + SALT_BYTE_LENGTH + UNLOCK_HASH_BYTE_LENGTH;
 const VALID_LOCK_MODES = new Set(['hard-lock', 'warn-only']);
 const VALID_DEVICE_POLICIES = new Set(['all-devices', 'phones-only']);
 const MIN_UNLOCK_KEY_LENGTH = 8;
@@ -139,7 +142,38 @@ async function deriveExamKey(examPin, saltBytes, usages) {
  * }}
  */
 function parseRawEnvelope(token) {
-  const jsonText = decoder.decode(base64UrlToBytes(token));
+  const rawBytes = base64UrlToBytes(token);
+  if (rawBytes.length >= BINARY_HEADER_LENGTH + 16 && rawBytes[0] === ENVELOPE_VERSION_BINARY) {
+    const flags = rawBytes[1];
+    const maxStrikes = (rawBytes[2] << 8) | rawBytes[3];
+    if (maxStrikes < 1) {
+      throw new Error('Malformed binary envelope fields');
+    }
+    let offset = 4;
+    const saltBytes = rawBytes.subarray(offset, offset + SALT_BYTE_LENGTH);
+    offset += SALT_BYTE_LENGTH;
+    const ivBytes = rawBytes.subarray(offset, offset + IV_BYTE_LENGTH);
+    offset += IV_BYTE_LENGTH;
+    const unlockSaltBytes = rawBytes.subarray(offset, offset + SALT_BYTE_LENGTH);
+    offset += SALT_BYTE_LENGTH;
+    const unlockHashBytes = rawBytes.subarray(offset, offset + UNLOCK_HASH_BYTE_LENGTH);
+    offset += UNLOCK_HASH_BYTE_LENGTH;
+    const cipherBytes = rawBytes.subarray(offset);
+
+    return {
+      v: ENVELOPE_VERSION_BINARY,
+      saltBytes,
+      ivBytes,
+      cipherBytes,
+      maxStrikes,
+      lockMode: (flags & 1) === 1 ? 'warn-only' : 'hard-lock',
+      devicePolicy: (flags & 2) === 2 ? 'phones-only' : 'all-devices',
+      unlockSalt: bytesToHex(unlockSaltBytes),
+      unlockHash: bytesToHex(unlockHashBytes),
+    };
+  }
+
+  const jsonText = decoder.decode(rawBytes);
   const data = JSON.parse(jsonText);
 
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
@@ -363,34 +397,42 @@ export async function createExamEnvelope(config) {
   const ivBytes = globalThis.crypto.getRandomValues(new Uint8Array(IV_BYTE_LENGTH));
   const key = await deriveExamKey(examPin, saltBytes, ['encrypt']);
 
-  const secretPayload = JSON.stringify({
-    title: config.title.trim(),
-    formUrl: normalizedFormUrl,
-    webhookUrl: trimmedWebhookUrl,
-    ...(config.roster ? { roster: config.roster } : {}),
-  });
+  const secretPayload = JSON.stringify(
+    config.roster
+      ? [config.title.trim(), normalizedFormUrl, trimmedWebhookUrl, config.roster]
+      : [config.title.trim(), normalizedFormUrl, trimmedWebhookUrl]
+  );
 
   const cipherBuffer = await globalThis.crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: ivBytes },
     key,
     encoder.encode(secretPayload)
   );
+  const cipherBytes = new Uint8Array(cipherBuffer);
 
   const { saltHex: unlockSalt, hashHex: unlockHash } = await hashPin(unlockPin);
+  const unlockSaltBytes = hexToBytes(unlockSalt);
+  const unlockHashBytes = hexToBytes(unlockHash);
 
-  const envelope = {
-    v: ENVELOPE_VERSION,
-    salt: bytesToBase64Url(saltBytes),
-    iv: bytesToBase64Url(ivBytes),
-    maxStrikes: config.maxStrikes,
-    lockMode: config.lockMode,
-    devicePolicy: config.devicePolicy,
-    unlockSalt,
-    unlockHash,
-    ct: bytesToBase64Url(new Uint8Array(cipherBuffer)),
-  };
+  const packed = new Uint8Array(BINARY_HEADER_LENGTH + cipherBytes.length);
+  packed[0] = ENVELOPE_VERSION_BINARY;
+  packed[1] =
+    (config.lockMode === 'warn-only' ? 1 : 0) | (config.devicePolicy === 'phones-only' ? 2 : 0);
+  packed[2] = (config.maxStrikes >> 8) & 0xff;
+  packed[3] = config.maxStrikes & 0xff;
 
-  return bytesToBase64Url(encoder.encode(JSON.stringify(envelope)));
+  let offset = 4;
+  packed.set(saltBytes, offset);
+  offset += SALT_BYTE_LENGTH;
+  packed.set(ivBytes, offset);
+  offset += IV_BYTE_LENGTH;
+  packed.set(unlockSaltBytes, offset);
+  offset += SALT_BYTE_LENGTH;
+  packed.set(unlockHashBytes, offset);
+  offset += UNLOCK_HASH_BYTE_LENGTH;
+  packed.set(cipherBytes, offset);
+
+  return bytesToBase64Url(packed);
 }
 
 /**
@@ -440,9 +482,9 @@ export async function decryptExamEnvelope(token, examPin) {
     }
 
     const envelope = parseRawEnvelope(token);
-    const saltBytes = base64UrlToBytes(envelope.salt);
-    const ivBytes = base64UrlToBytes(envelope.iv);
-    const cipherBytes = base64UrlToBytes(envelope.ct);
+    const saltBytes = envelope.saltBytes || base64UrlToBytes(envelope.salt);
+    const ivBytes = envelope.ivBytes || base64UrlToBytes(envelope.iv);
+    const cipherBytes = envelope.cipherBytes || base64UrlToBytes(envelope.ct);
 
     if (saltBytes.length !== SALT_BYTE_LENGTH || ivBytes.length !== IV_BYTE_LENGTH) {
       throw new Error('Invalid cryptographic parameter length');
@@ -455,7 +497,15 @@ export async function decryptExamEnvelope(token, examPin) {
       cipherBytes
     );
 
-    const secret = JSON.parse(decoder.decode(new Uint8Array(plainBuffer)));
+    const parsedSecret = JSON.parse(decoder.decode(new Uint8Array(plainBuffer)));
+    const secret = Array.isArray(parsedSecret)
+      ? {
+          title: parsedSecret[0],
+          formUrl: parsedSecret[1],
+          webhookUrl: parsedSecret[2],
+          roster: parsedSecret[3],
+        }
+      : parsedSecret;
     if (
       !secret ||
       typeof secret !== 'object' ||

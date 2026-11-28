@@ -211,6 +211,9 @@
         </div>
         <div class="topbar-right">
           <span id="strike-pill" class="strike-pill">Strikes: 0 / 3</span>
+          <button type="button" id="view-score-btn" class="btn btn-topbar-score btn-sm">
+            View Score
+          </button>
           <button type="button" id="reenter-fullscreen-btn" class="btn btn-topbar-fs btn-sm" hidden>
             Re-enter Fullscreen
           </button>
@@ -299,7 +302,79 @@
           </form>
         </div>
       </div>
+
+      <div id="view-score-confirm-overlay" class="view-score-overlay" role="dialog" aria-modal="true" aria-labelledby="view-score-title" hidden>
+        <div class="view-score-card">
+          <div class="badge-pill badge-success">VIEW SCORE • NO MALPRACTICE</div>
+          <h2 id="view-score-title">Confirm Form Saved &amp; View Score</h2>
+          <p class="subtitle">
+            Selecting <strong>View Score</strong> does not count as malpractice. Once you confirm that your Google Form is saved and submitted, access to the exam form will become permanently obsolete and only your score will be visible.
+          </p>
+
+          <div id="view-score-error" class="alert-banner alert-error" role="alert" hidden></div>
+
+          <div class="field-group">
+            <label for="score-url-input">Google Form Score Link (Optional)</label>
+            <input
+              id="score-url-input"
+              name="scoreUrl"
+              type="url"
+              placeholder="https://docs.google.com/forms/d/e/.../viewscore?viewscore=..."
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <span class="field-hint">
+              If you opened or copied the Google Form &ldquo;View score&rdquo; link, paste it here to display your score directly, or leave blank if your score is already open in another tab.
+            </span>
+          </div>
+
+          <div class="view-score-actions">
+            <button type="button" id="confirm-view-score-btn" class="btn btn-primary btn-block">
+              Form Saved &amp; Submitted — View Score Only
+            </button>
+            <button type="button" id="cancel-view-score-btn" class="btn btn-secondary btn-block">
+              Cancel — Return to Exam
+            </button>
+          </div>
+        </div>
+      </div>
     </section>
+
+    <main id="submitted-view" class="student-shell" hidden>
+      <section class="proctor-card submitted-card">
+        <div class="badge-pill badge-success">FORM SAVED &amp; SUBMITTED • ACCESS OBSOLETE</div>
+        <h1>Examination Score View</h1>
+        <p id="submitted-candidate-info" class="subtitle"></p>
+        <p class="subtitle">
+          Your examination form has been saved and submitted. Access to the exam form is now obsolete and cannot be reopened. Viewing your score does not count as malpractice.
+        </p>
+
+        <div id="score-only-notice" class="score-only-notice">
+          <strong>Only Score Visible:</strong> Proctoring has stopped and the exam form has been closed. You may view your Google Form score tab without any malpractice penalty.
+        </div>
+
+        <iframe
+          id="score-iframe"
+          class="score-iframe"
+          referrerpolicy="no-referrer"
+          title="Examination Score"
+          hidden
+        ></iframe>
+
+        <div class="form-actions">
+          <a
+            id="open-score-tab-link"
+            class="btn btn-primary"
+            href="#"
+            target="_blank"
+            rel="noopener noreferrer"
+            hidden
+          >
+            Open Score in New Tab
+          </a>
+        </div>
+      </section>
+    </main>
   </div>
 
   <script type="module" src="./src/ui/student-app.js"></script>

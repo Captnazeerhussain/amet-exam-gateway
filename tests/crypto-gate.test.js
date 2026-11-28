@@ -93,7 +93,8 @@ test('createExamEnvelope hides secrets in base64url envelope, exposes metadata, 
   assert.ok(!rawJson.includes('TCH-998877'), 'unlockPin must not appear in plaintext envelope');
 
   const meta = parseEnvelopeMetadata(token);
-  assert.equal(meta.v, 1);
+  assert.equal(meta.v, 2);
+  assert.ok(token.length < 400, `Expected compact token < 400 chars, got ${token.length}`);
   assert.equal(meta.maxStrikes, 3);
   assert.equal(meta.lockMode, 'hard-lock');
   assert.equal(meta.devicePolicy, 'phones-only');
@@ -130,16 +131,9 @@ test('decryptExamEnvelope throws INVALID_EXAM_PIN on wrong PIN, tampered ciphert
     (err) => err instanceof Error && err.message === 'INVALID_EXAM_PIN'
   );
 
-  // Tamper with ciphertext inside envelope JSON
-  const parsed = JSON.parse(decodeBase64UrlToString(token));
-  const lastChar = parsed.ct.slice(-1);
-  parsed.ct = parsed.ct.slice(0, -1) + (lastChar === 'A' ? 'B' : 'A');
-  const tamperedJsonBytes = new TextEncoder().encode(JSON.stringify(parsed));
-  let bin = '';
-  for (const byte of tamperedJsonBytes) {
-    bin += String.fromCharCode(byte);
-  }
-  const tamperedToken = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  // Tamper with ciphertext at the end of the binary envelope
+  const lastChar = token.slice(-2, -1);
+  const tamperedToken = token.slice(0, -2) + (lastChar === 'A' ? 'B' : 'A') + token.slice(-1);
 
   await assert.rejects(
     () => decryptExamEnvelope(tamperedToken, '4321'),

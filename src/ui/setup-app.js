@@ -188,6 +188,24 @@ function isRollAlreadyClaimed_(ss, rollId, examTitle) {
   return false;
 }
 
+function isRollAlreadySubmitted_(ss, rollId, examTitle) {
+  const sheet = ss.getSheetByName('Proctor_Events');
+  if (!sheet || sheet.getLastRow() < 2) {
+    return false;
+  }
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 7).getValues();
+  for (let i = 0; i < rows.length; i += 1) {
+    if (
+      sanitizeSheetText_(String(rows[i][2] || '').trim()) === rollId &&
+      sanitizeSheetText_(String(rows[i][4] || '').trim()) === examTitle &&
+      String(rows[i][6] || '').trim() === 'SUBMITTED'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Atomic single-use claim via GET ?action=claim&rollId=...&examTitle=...&sessionId=...[&resume=1]
  * The claim is recorded in Proctor_Claims under the script lock, so two devices racing
@@ -218,6 +236,11 @@ function doGet(e) {
   lock.waitLock(10000);
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (isRollAlreadySubmitted_(ss, rollId, examTitle)) {
+      return ContentService.createTextOutput(
+        JSON.stringify({ ok: false, allowed: false, reason: 'FORM_ALREADY_SUBMITTED' })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
     if (!isResume && isRollAlreadyClaimed_(ss, rollId, examTitle)) {
       return ContentService.createTextOutput(
         JSON.stringify({ ok: false, allowed: false, reason: 'KEY_ALREADY_USED' })

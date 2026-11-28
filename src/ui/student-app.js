@@ -204,6 +204,8 @@ export function createExamSessionController(deps) {
   let mediaGraceUntil = null;
   let fullscreenLostAtMs = null;
   let blurStartedAtMs = null;
+  let isSubmitted = false;
+  let isViewingScore = false;
 
   function ensureStarted() {
     if (!strikeEngine || !telemetryClient) {
@@ -330,7 +332,11 @@ export function createExamSessionController(deps) {
     }
 
     const sessionLookupKey = `proctor_session_${cleanRoll}_${meta.unlockHash.slice(0, 16)}`;
+    const submittedLookupKey = `proctor_submitted_${cleanRoll}_${meta.unlockHash.slice(0, 16)}`;
     const usedKey = `proctor_used_${meta.unlockHash.slice(0, 16)}`;
+    if (safeStorageGet(sessionStore, submittedLookupKey)) {
+      throw new Error('FORM_ALREADY_SUBMITTED');
+    }
     const previousSessionId = safeStorageGet(sessionStore, sessionLookupKey);
     const usedLocally = Boolean(previousSessionId || safeStorageGet(sessionStore, usedKey));
 
@@ -373,17 +379,20 @@ export function createExamSessionController(deps) {
         });
         if (claimRes && claimRes.ok && typeof claimRes.json === 'function') {
           const claimData = await claimRes.json();
-          if (
-            !resuming &&
-            claimData &&
-            claimData.allowed === false &&
-            claimData.reason === 'KEY_ALREADY_USED'
-          ) {
-            throw new Error('KEY_ALREADY_USED');
+          if (claimData && claimData.allowed === false) {
+            if (claimData.reason === 'FORM_ALREADY_SUBMITTED') {
+              throw new Error('FORM_ALREADY_SUBMITTED');
+            }
+            if (!resuming && claimData.reason === 'KEY_ALREADY_USED') {
+              throw new Error('KEY_ALREADY_USED');
+            }
           }
         }
       } catch (claimErr) {
-        if (claimErr instanceof Error && claimErr.message === 'KEY_ALREADY_USED') {
+        if (
+          claimErr instanceof Error &&
+          (claimErr.message === 'KEY_ALREADY_USED' || claimErr.message === 'FORM_ALREADY_SUBMITTED')
+        ) {
           throw claimErr;
         }
         // Fail open on transient offline/CORS errors so honest students on flaky Wi-Fi are not blocked.
@@ -409,6 +418,8 @@ export function createExamSessionController(deps) {
     mediaGraceUntil = null;
     fullscreenLostAtMs = null;
     blurStartedAtMs = null;
+    isSubmitted = false;
+    isViewingScore = false;
 
     strikeEngine = createStrikeEngine({
       sessionKey: `proctor_strikes_${sessionId}`,
@@ -486,6 +497,22 @@ export function createExamSessionController(deps) {
 
   async function evaluateTick(runtimeSnapshot, nowMs = Date.now(), snapshotBase64 = null) {
     ensureStarted();
+    if (isSubmitted || isViewingScore) {
+      fullscreenLostAtMs = null;
+      blurStartedAtMs = null;
+      return {
+        ok: true,
+        submitted: isSubmitted,
+        viewingScore: isViewingScore,
+        violation: null,
+        counted: false,
+        freezeForm: false,
+        fullscreenWarning: false,
+        fullscreenRemainingSec: 0,
+        alertMessage: null,
+        ...strikeEngine.getState(),
+      };
+    }
     const currentMs = Number.isFinite(nowMs) ? nowMs : Date.now();
     const integrity = evaluateRuntimeIntegrity({
       deviceType,
@@ -624,6 +651,19 @@ export function createExamSessionController(deps) {
     snapshotBase64 = null
   ) {
     ensureStarted();
+    if (isSubmitted || isViewingScore) {
+      return {
+        cameraOk: true,
+        micOk: true,
+        submitted: isSubmitted,
+        viewingScore: isViewingScore,
+        rms: 0,
+        isSpeechSpike: false,
+        counted: false,
+        alertMessage: null,
+        ...strikeEngine.getState(),
+      };
+    }
     let audio = { rms: 0, isSpeechSpike: false };
     if (Number.isFinite(audioRms)) {
       audio = classifyAudioRms(audioRms);
@@ -717,6 +757,16 @@ export function createExamSessionController(deps) {
 
   async function recordExternalViolation(reason, nowMs = Date.now(), snapshotBase64 = null) {
     ensureStarted();
+    if (isSubmitted || isViewingScore) {
+      return {
+        reason,
+        submitted: isSubmitted,
+        viewingScore: isViewingScore,
+        counted: false,
+        alertMessage: null,
+        ...strikeEngine.getState(),
+      };
+    }
     const res = await recordViolationAndNotify(reason, nowMs, snapshotBase64);
     return {
       reason,
@@ -793,6 +843,49 @@ export function createExamSessionController(deps) {
     });
   }
 
+  function markSubmitted({ reason = 'FORM_SUBMITTED', nowIso = new Date().toISOString(), viewingScore = false } = {}) {
+    ensureStarted();
+    isSubmitted = true;
+    if (viewingScore) {
+      isViewingScore = true;
+    }
+    const submittedLookupKey = `proctor_submitted_${activeRollId}_${meta.unlockHash.slice(0, 16)}`;
+    safeStorageSet(sessionStore, submittedLookupKey, nowIso);
+    fullscreenLostAtMs = null;
+    blurStartedAtMs = null;
+    unlockGraceUntil = null;
+    mediaGraceUntil = null;
+
+    const state = strikeEngine.getState();
+    void safeEnqueue(
+      'SUBMITTED',
+      {
+        strikes: state.strikes,
+        locked: false,
+        reason,
+        cameraOk,
+        micSpikes,
+      },
+      nowIso
+    ).catch(() => {});
+
+    return {
+      submitted: true,
+      viewingScore: isViewingScore,
+      strikes: state.strikes,
+      maxStrikes: state.maxStrikes,
+      locked: false,
+    };
+  }
+
+  function selectViewScore({ nowIso = new Date().toISOString() } = {}) {
+    return markSubmitted({ reason: 'VIEW_SCORE_SELECTED', nowIso, viewingScore: true });
+  }
+
+  function isSubmittedOrViewingScore() {
+    return isSubmitted || isViewingScore;
+  }
+
   return {
     getMetadata,
     checkEnvironment,
@@ -802,6 +895,9 @@ export function createExamSessionController(deps) {
     recordExternalViolation,
     sendHeartbeat,
     unlockExam,
+    selectViewScore,
+    markSubmitted,
+    isSubmittedOrViewingScore,
     getRefreshWatermark,
     formatCurrentAlert,
   };
@@ -889,6 +985,7 @@ export function initStudentPage(
   const cameraStatusText = doc.getElementById('camera-status-text');
   const micMeterFill = doc.getElementById('mic-meter-fill');
   const strikePill = doc.getElementById('strike-pill');
+  const viewScoreBtn = doc.getElementById('view-score-btn');
   const reenterFullscreenBtn = doc.getElementById('reenter-fullscreen-btn');
 
   const malpracticeToast = doc.getElementById('malpractice-toast');
@@ -901,12 +998,22 @@ export function initStudentPage(
   const unlockForm = doc.getElementById('unlock-form');
   const unlockSubmitBtn = doc.getElementById('unlock-submit-btn');
   const unlockPinInput = doc.getElementById('unlock-pin-input');
+  const viewScoreConfirmOverlay = doc.getElementById('view-score-confirm-overlay');
+  const viewScoreError = doc.getElementById('view-score-error');
+  const scoreUrlInput = doc.getElementById('score-url-input');
+  const confirmViewScoreBtn = doc.getElementById('confirm-view-score-btn');
+  const cancelViewScoreBtn = doc.getElementById('cancel-view-score-btn');
+  const submittedView = doc.getElementById('submitted-view');
+  const submittedCandidateInfo = doc.getElementById('submitted-candidate-info');
+  const scoreOnlyNotice = doc.getElementById('score-only-notice');
+  const scoreIframe = doc.getElementById('score-iframe');
+  const openScoreTabLink = doc.getElementById('open-score-tab-link');
   const headerLiveClock = doc.getElementById('header-live-clock');
   const activeCandidateBadge = doc.getElementById('active-candidate-badge');
   const examElapsedTimer = doc.getElementById('exam-elapsed-timer');
 
   function showOnlyView(viewToShow) {
-    for (const view of [missingView, blockedView, startGate, examStage]) {
+    for (const view of [missingView, blockedView, startGate, examStage, submittedView]) {
       if (view) {
         view.hidden = view !== viewToShow;
       }
@@ -957,6 +1064,40 @@ export function initStudentPage(
     screenExtended: Boolean(win?.screen?.isExtended),
   });
 
+  function syncViewportLayout() {
+    const innerWidth = Number(win?.innerWidth) || 0;
+    const innerHeight = Number(win?.innerHeight) || 0;
+    const isPlatformMobile = envCheck.deviceType === 'android' || envCheck.deviceType === 'ios';
+    const isNarrowViewport = innerWidth > 0 && innerWidth <= 860;
+    const isMobileLayout = isPlatformMobile || isNarrowViewport;
+
+    let aspectMode = 'desktop';
+    if (isMobileLayout) {
+      aspectMode = innerWidth > innerHeight && innerHeight > 0 ? 'mobile-landscape' : 'mobile-portrait';
+    }
+
+    const topbarHeight =
+      aspectMode === 'mobile-landscape' ? '34px' : aspectMode === 'mobile-portrait' ? '38px' : '48px';
+
+    appRoot.setAttribute?.('data-device-type', envCheck.deviceType);
+    appRoot.setAttribute?.('data-mobile', isMobileLayout ? 'true' : 'false');
+    appRoot.setAttribute?.('data-aspect-mode', aspectMode);
+    appRoot.classList?.toggle?.('is-mobile-device', isMobileLayout);
+    appRoot.classList?.toggle?.('is-mobile-portrait', aspectMode === 'mobile-portrait');
+    appRoot.classList?.toggle?.('is-mobile-landscape', aspectMode === 'mobile-landscape');
+
+    try {
+      appRoot.style?.setProperty?.('--exam-topbar-height', topbarHeight);
+      doc.documentElement?.style?.setProperty?.('--exam-topbar-height', topbarHeight);
+    } catch {
+      // Ignore CSS custom property errors on mock DOM elements.
+    }
+  }
+
+  syncViewportLayout();
+  win?.addEventListener?.('resize', syncViewportLayout);
+  win?.addEventListener?.('orientationchange', syncViewportLayout);
+
   if (!envCheck.allowed) {
     showBlockedReasons(envCheck.reasons);
     return;
@@ -990,7 +1131,116 @@ export function initStudentPage(
   let toastTimerId = null;
   let broadcastChannel = null;
   let examStartedAtMs = null;
+  let activeCandidateDisplay = '';
+  let activeTitleDisplay = '';
   const tabInstanceId = generateSessionId();
+
+  function isValidGoogleScoreUrl(rawUrl) {
+    if (typeof rawUrl !== 'string' || !rawUrl.trim()) {
+      return false;
+    }
+    try {
+      const parsed = new URL(rawUrl.trim());
+      return (
+        parsed.protocol === 'https:' &&
+        parsed.hostname === 'docs.google.com' &&
+        /\/forms\/.*\/viewscore\/?$/i.test(parsed.pathname)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function stopAllProctoringAndDisposeForm() {
+    isExamActive = false;
+    if (toastTimerId) {
+      clearTimeout(toastTimerId);
+      toastTimerId = null;
+    }
+    if (activeStream) {
+      stopMediaStream(activeStream);
+      activeStream = null;
+    }
+    if (hudVideo) {
+      try {
+        hudVideo.srcObject = null;
+      } catch {
+        // Ignore preview detach errors.
+      }
+    }
+    try {
+      broadcastChannel?.close?.();
+    } catch {
+      // Ignore BroadcastChannel close errors.
+    }
+    broadcastChannel = null;
+    try {
+      wakeLockSentinel?.release?.()?.catch?.(() => {});
+    } catch {
+      // Ignore WakeLock release errors.
+    }
+    wakeLockSentinel = null;
+    if (fullscreenWarningOverlay) {
+      fullscreenWarningOverlay.hidden = true;
+    }
+    if (lockoutOverlay) {
+      lockoutOverlay.hidden = true;
+    }
+    if (malpracticeToast) {
+      malpracticeToast.hidden = true;
+    }
+    if (viewScoreConfirmOverlay) {
+      viewScoreConfirmOverlay.hidden = true;
+    }
+    if (examIframe) {
+      examIframe.src = 'about:blank';
+      examIframe.hidden = true;
+      examIframe.style.visibility = 'hidden';
+      examIframe.style.pointerEvents = 'none';
+    }
+    try {
+      if (isCurrentlyFullscreen()) {
+        doc.exitFullscreen?.()?.catch?.(() => {});
+      }
+    } catch {
+      // Ignore exitFullscreen errors.
+    }
+  }
+
+  function enterSubmittedScoreView(scoreUrl = '') {
+    controller.selectViewScore();
+    stopAllProctoringAndDisposeForm();
+    if (submittedCandidateInfo) {
+      const parts = [activeTitleDisplay, activeCandidateDisplay].filter(Boolean);
+      submittedCandidateInfo.textContent = parts.join(' • ');
+    }
+    const cleanScoreUrl = typeof scoreUrl === 'string' ? scoreUrl.trim() : '';
+    if (cleanScoreUrl && isValidGoogleScoreUrl(cleanScoreUrl)) {
+      if (scoreIframe) {
+        scoreIframe.src = cleanScoreUrl;
+        scoreIframe.hidden = false;
+      }
+      if (openScoreTabLink) {
+        openScoreTabLink.href = cleanScoreUrl;
+        openScoreTabLink.hidden = false;
+      }
+      if (scoreOnlyNotice) {
+        scoreOnlyNotice.hidden = true;
+      }
+    } else {
+      if (scoreIframe) {
+        scoreIframe.src = 'about:blank';
+        scoreIframe.hidden = true;
+      }
+      if (openScoreTabLink) {
+        openScoreTabLink.hidden = true;
+      }
+      if (scoreOnlyNotice) {
+        scoreOnlyNotice.hidden = false;
+      }
+    }
+    showOnlyView(submittedView);
+  }
 
   const scheduleInterval = (fn, ms) =>
     typeof win?.setInterval === 'function' ? win.setInterval(fn, ms) : setInterval(fn, ms);
@@ -2043,6 +2293,8 @@ export function initStudentPage(
         activeAiCanaryText = started.aiCanaryText;
         examStartedAtMs = Date.now();
 
+        activeTitleDisplay = started.title || '';
+        activeCandidateDisplay = `${studentName.trim()} (${rollId.trim()})`;
         if (examTitleDisplay && started.title) {
           examTitleDisplay.textContent = started.title;
         }
@@ -2054,6 +2306,7 @@ export function initStudentPage(
         }
 
         if (examIframe) {
+          examIframe.hidden = false;
           examIframe.src = started.formUrl;
         }
         populateStealthWatermark(activeWatermarkTiles);
@@ -2081,6 +2334,9 @@ export function initStudentPage(
         let msg = code;
         if (code === 'INVALID_EXAM_PIN') {
           msg = 'Incorrect Exam Access Key. Verify the key announced by your teacher and retry.';
+        } else if (code === 'FORM_ALREADY_SUBMITTED') {
+          msg =
+            'Your examination form has already been saved and submitted. Access to the form is obsolete and cannot be reopened.';
         } else if (code === 'KEY_ALREADY_USED') {
           msg =
             'This Examination Access Key has already been used for your Roll Number / browser. Re-opening is blocked — ask your invigilator to enter the Teacher Unlock Key in "Invigilator Resume Key" below to continue.';
@@ -2155,6 +2411,51 @@ export function initStudentPage(
           unlockSubmitBtn.disabled = false;
         }
       }
+    });
+  }
+
+  if (viewScoreBtn) {
+    viewScoreBtn.addEventListener('click', () => {
+      if (!isExamActive) {
+        return;
+      }
+      if (viewScoreError) {
+        viewScoreError.hidden = true;
+        viewScoreError.textContent = '';
+      }
+      if (viewScoreConfirmOverlay) {
+        viewScoreConfirmOverlay.hidden = false;
+      }
+    });
+  }
+
+  if (cancelViewScoreBtn) {
+    cancelViewScoreBtn.addEventListener('click', () => {
+      if (viewScoreConfirmOverlay) {
+        viewScoreConfirmOverlay.hidden = true;
+      }
+      if (viewScoreError) {
+        viewScoreError.hidden = true;
+        viewScoreError.textContent = '';
+      }
+    });
+  }
+
+  if (confirmViewScoreBtn) {
+    confirmViewScoreBtn.addEventListener('click', () => {
+      if (!isExamActive) {
+        return;
+      }
+      const rawScoreUrl = scoreUrlInput?.value?.trim() || '';
+      if (rawScoreUrl && !isValidGoogleScoreUrl(rawScoreUrl)) {
+        if (viewScoreError) {
+          viewScoreError.textContent =
+            'Enter a valid Google Forms "viewscore" link (https://docs.google.com/forms/.../viewscore) or leave the field blank.';
+          viewScoreError.hidden = false;
+        }
+        return;
+      }
+      enterSubmittedScoreView(rawScoreUrl);
     });
   }
 }

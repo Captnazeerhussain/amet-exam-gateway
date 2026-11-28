@@ -383,13 +383,16 @@ export function createProctorBackendServer() {
         const qTitle = cleanStr(fullUrl.searchParams.get('examTitle'), '');
         const qSession = cleanStr(fullUrl.searchParams.get('sessionId'), '');
         const isResume = fullUrl.searchParams.get('resume') === '1';
+        const alreadySubmitted = events.some(
+          (ev) => ev.rollId === qRoll && ev.examTitle === qTitle && ev.eventType === 'SUBMITTED'
+        );
         const alreadyExists =
           !isResume &&
           (claims.some((c) => c.rollId === qRoll && c.examTitle === qTitle) ||
             Array.from(summaryMap.values()).some(
               (row) => row.rollId === qRoll && row.examTitle === qTitle
             ));
-        if (!alreadyExists && qRoll && qTitle) {
+        if (!alreadySubmitted && !alreadyExists && qRoll && qTitle) {
           // Record the claim immediately (atomic in single-threaded Node) to close the race
           // where two devices pass the check before either START event arrives.
           claims.push({
@@ -403,9 +406,11 @@ export function createProctorBackendServer() {
         res.writeHead(200, { ...corsHeaders, 'Content-Type': 'application/json; charset=utf-8' });
         res.end(
           JSON.stringify(
-            alreadyExists
-              ? { ok: false, allowed: false, reason: 'KEY_ALREADY_USED' }
-              : { ok: true, allowed: true }
+            alreadySubmitted
+              ? { ok: false, allowed: false, reason: 'FORM_ALREADY_SUBMITTED' }
+              : alreadyExists
+                ? { ok: false, allowed: false, reason: 'KEY_ALREADY_USED' }
+                : { ok: true, allowed: true }
           )
         );
         return;
