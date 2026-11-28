@@ -133,7 +133,7 @@ test('selectViewScore disarms malpractice checks and makes form access obsolete 
   );
 });
 
-test('initStudentPage View Score flow disposes exam iframe, shows only score, and ignores blur/tab-hide', async () => {
+async function startViewScoreUi() {
   const { examUrl } = await makeToken();
   const elements = new Map();
   const docListeners = new Map();
@@ -185,7 +185,7 @@ test('initStudentPage View Score flow disposes exam iframe, shows only score, an
     'lockout-message', 'unlock-error', 'unlock-form', 'unlock-submit-btn', 'unlock-pin-input',
     'view-score-btn', 'view-score-confirm-overlay', 'view-score-error', 'score-url-input',
     'confirm-view-score-btn', 'cancel-view-score-btn', 'submitted-view', 'submitted-candidate-info',
-    'score-only-notice', 'score-iframe', 'open-score-tab-link',
+    'score-only-notice', 'score-iframe', 'open-score-tab-link', 'view-score-teacher-pin',
   ];
   for (const id of ids) makeEl(id);
   elements.get('resume-field-group').hidden = true;
@@ -256,6 +256,54 @@ test('initStudentPage View Score flow disposes exam iframe, shows only score, an
   assert.equal(elements.get('exam-stage').hidden, false);
   assert.match(elements.get('exam-iframe').src, /\/viewform/);
 
+  const click = (id) => elements.get(id).listeners.get('click')();
+  return { elements, doc, docListeners, winListeners, click, isTrackStopped: () => trackStopped };
+}
+
+function assertExamStillOpen(elements) {
+  assert.equal(elements.get('exam-stage').hidden, false);
+  assert.equal(elements.get('submitted-view').hidden, true);
+  assert.match(elements.get('exam-iframe').src, /\/viewform/);
+}
+
+test('View Score refuses to close the exam without the Teacher Unlock Key', async () => {
+  const { elements, click } = await startViewScoreUi();
+  click('view-score-btn');
+
+  for (const badKey of ['', 'TCH-WRONG-0000']) {
+    elements.get('view-score-teacher-pin').value = badKey;
+    elements.get('view-score-error').hidden = true;
+    await click('confirm-view-score-btn');
+    assertExamStillOpen(elements);
+    assert.equal(elements.get('view-score-error').hidden, false);
+    assert.match(elements.get('view-score-error').textContent, /Teacher Unlock Key/);
+  }
+});
+
+test('Cancel during the Teacher Unlock Key check keeps the exam open and clears the key', async () => {
+  const { elements, click } = await startViewScoreUi();
+  click('view-score-btn');
+  elements.get('view-score-teacher-pin').value = 'TCH-SCR-9999';
+  const pending = click('confirm-view-score-btn');
+  click('cancel-view-score-btn');
+  await pending;
+
+  assertExamStillOpen(elements);
+  assert.equal(elements.get('view-score-teacher-pin').value, '');
+});
+
+test('index.html hides Teacher Unlock Key entry and places View Score after the live pill', () => {
+  const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  for (const id of ['unlock-pin-input', 'view-score-teacher-pin']) {
+    const tag = html.match(new RegExp(`<input[^>]*id="${id}"[^>]*>`))?.[0] || '';
+    assert.match(tag, /type="password"/, `#${id} must be a password input`);
+  }
+  assert.ok(html.indexOf('id="view-score-btn"') > html.indexOf('class="live-proctored-pill"'));
+});
+
+test('initStudentPage View Score flow disposes exam iframe, shows only score, and ignores blur/tab-hide', async () => {
+  const { elements, doc, docListeners, winListeners, isTrackStopped } = await startViewScoreUi();
+
   // Open View Score modal and cancel -> exam stays active
   elements.get('view-score-btn').listeners.get('click')();
   assert.equal(elements.get('view-score-confirm-overlay').hidden, false);
@@ -270,12 +318,14 @@ test('initStudentPage View Score flow disposes exam iframe, shows only score, an
   assert.equal(elements.get('view-score-error').hidden, false);
   assert.equal(elements.get('submitted-view').hidden, true);
 
-  // Confirm with valid Google Form viewscore URL -> form becomes obsolete, only score visible
+  // Confirm with Teacher Unlock Key and valid viewscore URL -> form becomes obsolete, only score visible
+  elements.get('view-score-teacher-pin').value = 'TCH-SCR-9999';
   const validScoreUrl = 'https://docs.google.com/forms/d/e/1FAIpQLScScore/viewscore?viewscore=xyz123';
   elements.get('score-url-input').value = validScoreUrl;
-  elements.get('confirm-view-score-btn').listeners.get('click')();
+  await elements.get('confirm-view-score-btn').listeners.get('click')();
 
-  assert.equal(trackStopped, true);
+  assert.equal(isTrackStopped(), true);
+  assert.equal(elements.get('view-score-teacher-pin').value, '');
   assert.equal(elements.get('exam-stage').hidden, true);
   assert.equal(elements.get('exam-iframe').src, 'about:blank');
   assert.equal(elements.get('exam-iframe').hidden, true);

@@ -23,7 +23,7 @@ test('generateAccessKey returns prefixed XXXX-XXXX keys using unambiguous alphan
   assert.match(defaultKey, /^EXM-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/);
 
   const teacherKey = generateAccessKey('TCH');
-  assert.match(teacherKey, /^TCH-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/);
+  assert.match(teacherKey, /^TCH-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/);
 
   const batch = new Set(Array.from({ length: 12 }, () => generateAccessKey('EXM')));
   assert.equal(batch.size, 12);
@@ -193,7 +193,7 @@ test('initSetupPage wires key generators, form submit, and error handling on a D
   await elements['gen-exam-key-btn'].dispatch('click');
   await elements['gen-unlock-key-btn'].dispatch('click');
   assert.match(elements['exam-pin'].value, /^EXM-[A-Z0-9]{4}-[A-Z0-9]{4}$/);
-  assert.match(elements['unlock-pin'].value, /^TCH-[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+  assert.match(elements['unlock-pin'].value, /^TCH-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/);
 
   await elements['setup-form'].dispatch('submit', { preventDefault() {} });
   assert.equal(elements['setup-error'].hidden, true);

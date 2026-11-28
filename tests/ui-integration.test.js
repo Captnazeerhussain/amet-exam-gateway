@@ -2434,3 +2434,259 @@ test('initStudentPage locks Step 1 and Step 2 until Step 0 Google Sign-In popup 
   assert.equal(isFs, true);
   assert.equal(elements.get('start-exam-btn').disabled, false);
 });
+
+test('clearBrowserForReExam rejects wrong Teacher Unlock Key and clears local browser locks on valid key', async () => {
+  const { token } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'Re-Exam Test',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScReExam/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-REX-2026',
+    unlockPin: 'TCH-REX-9999',
+    maxStrikes: 2,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+
+  const storage = createMemoryStorage();
+  const controller = createExamSessionController({ token, storage });
+  controller.checkEnvironment({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
+    webdriver: false,
+  });
+
+  const liveTracks = {
+    videoLabel: 'HD Webcam',
+    videoReadyState: 'live',
+    videoMuted: false,
+    audioLabel: 'Mic',
+    audioReadyState: 'live',
+    audioMuted: false,
+  };
+
+  await controller.startExam({
+    studentName: 'Asha Menon',
+    rollId: 'R-101',
+    examPin: 'EXM-REX-2026',
+    tracks: liveTracks,
+  });
+  controller.markSubmitted();
+
+  // Wrong Teacher Unlock Key does not clear
+  const badRes = await controller.clearBrowserForReExam('TCH-WRONG-0000', 'R-101');
+  assert.equal(badRes.cleared, false);
+  await assert.rejects(
+    () =>
+      controller.startExam({
+        studentName: 'Asha Menon',
+        rollId: 'R-101',
+        examPin: 'EXM-REX-2026',
+        tracks: liveTracks,
+      }),
+    /FORM_ALREADY_SUBMITTED/
+  );
+
+  // Valid Teacher Unlock Key clears local browser locks so re-exam can start fresh
+  const okRes = await controller.clearBrowserForReExam('TCH-REX-9999', 'R-101');
+  assert.equal(okRes.cleared, true);
+
+  const restarted = await controller.startExam({
+    studentName: 'Asha Menon',
+    rollId: 'R-101',
+    examPin: 'EXM-REX-2026',
+    tracks: liveTracks,
+  });
+  assert.equal(restarted.title, 'Re-Exam Test');
+  assert.equal(restarted.state.strikes, 0);
+});
+
+test('Teacher Re-Exam Reset clears browser, resets Step 0 Google Sign-In gate, and opens Google Logout', async () => {
+  const indexHtml = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(indexHtml, /teacher-reset-panel/);
+  assert.match(indexHtml, /teacher-reset-pin/);
+  assert.match(indexHtml, /teacher-reset-btn/);
+  assert.match(indexHtml, /submitted-reexam-btn/);
+
+  const { token, examUrl } = await buildStudentExamUrl('https://proctor.example/setup.html', {
+    title: 'Re-Exam UI Flow',
+    formUrl: 'https://docs.google.com/forms/d/e/1FAIpQLScReExamUI/viewform',
+    webhookUrl: '',
+    examPin: 'EXM-RUI-2026',
+    unlockPin: 'TCH-RUI-9999',
+    maxStrikes: 2,
+    lockMode: 'hard-lock',
+    devicePolicy: 'all-devices',
+  });
+  void token;
+
+  const elements = new Map();
+  const makeEl = (id, extra = {}) => {
+    const listeners = new Map();
+    const classes = new Set();
+    const el = {
+      id,
+      hidden: false,
+      disabled: false,
+      value: '',
+      textContent: '',
+      checked: false,
+      open: false,
+      children: [],
+      style: {},
+      classList: {
+        add: (...c) => c.forEach((x) => classes.add(x)),
+        remove: (...c) => c.forEach((x) => classes.delete(x)),
+        contains: (c) => classes.has(c),
+      },
+      addEventListener(type, fn) {
+        if (!listeners.has(type)) listeners.set(type, []);
+        listeners.get(type).push(fn);
+      },
+      async dispatch(type, event = {}) {
+        for (const fn of listeners.get(type) || []) {
+          await fn(event);
+        }
+      },
+      appendChild(node) {
+        this.children.push(node);
+        return node;
+      },
+      focus() {},
+      ...extra,
+    };
+    elements.set(id, el);
+    return el;
+  };
+
+  for (const id of [
+    'proctor-app',
+    'missing-exam-view',
+    'blocked-view',
+    'blocked-reasons',
+    'start-gate',
+    'policy-summary',
+    'start-error',
+    'start-form',
+    'google-signin-gate-btn',
+    'google-signin-status',
+    'enter-fullscreen-gate-btn',
+    'fullscreen-gate-status',
+    'start-exam-btn',
+    'student-name',
+    'roll-id',
+    'exam-pin',
+    'confirm-environment-checkbox',
+    'resume-field-group',
+    'resume-pin',
+    'teacher-reset-panel',
+    'teacher-reset-pin',
+    'teacher-reset-btn',
+    'teacher-reset-error',
+    'teacher-reset-success',
+    'submitted-reexam-btn',
+    'exam-stage',
+    'submitted-view',
+  ]) {
+    makeEl(id);
+  }
+  elements.get('enter-fullscreen-gate-btn').disabled = true;
+  elements.get('start-exam-btn').disabled = true;
+
+  let isFs = false;
+  const openedUrls = [];
+  const memStore = new Map();
+  const doc = {
+    location: { href: examUrl },
+    documentElement: {
+      requestFullscreen: async () => {
+        isFs = true;
+      },
+    },
+    get fullscreenElement() {
+      return isFs ? this.documentElement : null;
+    },
+    getElementById: (id) => elements.get(id) || null,
+    createElement: (tag) => makeEl(`__${tag}_${Math.random()}`),
+    addEventListener() {},
+  };
+
+  const win = {
+    location: { href: examUrl },
+    innerWidth: 1280,
+    innerHeight: 800,
+    screen: { width: 1280, height: 800, availWidth: 1280, availHeight: 800 },
+    localStorage: {
+      getItem: (k) => (memStore.has(k) ? memStore.get(k) : null),
+      setItem: (k, v) => memStore.set(k, String(v)),
+      removeItem: (k) => memStore.delete(k),
+      get length() {
+        return memStore.size;
+      },
+      key: (i) => Array.from(memStore.keys())[i] ?? null,
+    },
+    open(url) {
+      openedUrls.push(url);
+      return {};
+    },
+    addEventListener() {},
+    navigator: {
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
+      webdriver: false,
+      mediaDevices: {
+        getUserMedia: async () => ({
+          getVideoTracks: () => [{ label: 'HD Webcam', readyState: 'live', enabled: true, muted: false, stop() {} }],
+          getAudioTracks: () => [{ label: 'Mic', readyState: 'live', enabled: true, muted: false, stop() {} }],
+        }),
+      },
+    },
+  };
+
+  const prevLocalStorage = globalThis.localStorage;
+  globalThis.localStorage = win.localStorage;
+  try {
+    initStudentPage(doc, win);
+    assert.equal(
+      elements.get('blocked-view').hidden,
+      true,
+      `Blocked reasons: ${elements.get('blocked-reasons').children.map((c) => c.textContent).join(' | ')}`
+    );
+    assert.equal(elements.get('missing-exam-view').hidden, true);
+
+    // Complete Step 0 & Step 1 and simulate a prior proctor key in localStorage
+    memStore.set('proctor_used_dummy', 'R-101');
+    await elements.get('google-signin-gate-btn').dispatch('click', { preventDefault() {} });
+    assert.equal(elements.get('enter-fullscreen-gate-btn').disabled, false);
+    await elements.get('enter-fullscreen-gate-btn').dispatch('click', { preventDefault() {} });
+    assert.equal(elements.get('start-exam-btn').disabled, false);
+
+    // Clicking submitted-reexam-btn switches to start-gate and opens teacher-reset-panel
+    elements.get('start-gate').hidden = true;
+    elements.get('submitted-view').hidden = false;
+    await elements.get('submitted-reexam-btn').dispatch('click', {});
+    assert.equal(elements.get('start-gate').hidden, false);
+    assert.equal(elements.get('submitted-view').hidden, true);
+    assert.equal(elements.get('teacher-reset-panel').open, true);
+
+    // Wrong Teacher Unlock Key shows error and does not clear
+    elements.get('teacher-reset-pin').value = 'TCH-WRONG-1111';
+    await elements.get('teacher-reset-btn').dispatch('click', {});
+    assert.equal(elements.get('teacher-reset-error').hidden, false);
+    assert.equal(memStore.has('proctor_used_dummy'), true);
+
+    // Valid Teacher Unlock Key clears localStorage proctor keys, resets Step 0/1/2, and opens Google Logout
+    elements.get('teacher-reset-pin').value = 'TCH-RUI-9999';
+    elements.get('student-name').value = 'Old Student';
+    elements.get('roll-id').value = 'R-101';
+    await elements.get('teacher-reset-btn').dispatch('click', {});
+
+    assert.equal(elements.get('teacher-reset-error').hidden, true);
+    assert.equal(elements.get('teacher-reset-success').hidden, false);
+    assert.equal(memStore.has('proctor_used_dummy'), false);
+    assert.equal(elements.get('student-name').value, '');
+    assert.equal(elements.get('roll-id').value, '');
+    assert.equal(elements.get('enter-fullscreen-gate-btn').disabled, true);
+    assert.equal(elements.get('start-exam-btn').disabled, true);
+    assert.ok(openedUrls.some((u) => u.startsWith('https://accounts.google.com/Logout')));
+  } finally {
+    globalThis.localStorage = prevLocalStorage;
+  }
+});
