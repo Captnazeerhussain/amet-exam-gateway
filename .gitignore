@@ -1,2 +1,9 @@
+.worktrees/
+.superpowers/
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+
 # Exam question banks and answer keys must never be committed (public repository)
 docs/*Question_Bank*
